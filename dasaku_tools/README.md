@@ -1,7 +1,7 @@
 # 駄作　～ヌイアワセ～ tools
 
 Toolkit for extracting/repacking assets for the (very 18+!) visual novel **駄作 \~ヌイアワセ\~** by CYCLET.
-It includes a variable-width font hook/override with `ddraw.dll`.
+Includes a variable-width font hook/override with `ddraw.dll`.
 
 ## Requirements
 
@@ -46,7 +46,5 @@ Set a custom font in the `font.json` config file (defaults to Noto Sans JP if av
 
 ## Credits
 
-`libraries\VNTextPatch\` is vendored from **VNTranslationTools** by **arcusmaximus**
-([repo](https://github.com/arcusmaximus/VNTranslationTools), v0.0.41), used under the
-**MIT License** -- see [libraries/VNTextPatch/UPSTREAM.md](libraries/VNTextPatch/UPSTREAM.md).
-Only its `.exe.config` (our word-wrap calibration) is modified.
+`libraries\VNTextPatch\` from **VNTranslationTools** by **arcusmaximus**
+([repo](https://github.com/arcusmaximus/VNTranslationTools), v0.0.41).
