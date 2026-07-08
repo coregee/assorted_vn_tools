@@ -1,0 +1,11 @@
+__pycache__/
+libraries/.working/
+*.orig
+game/
+game_remaster/
+image/
+voice/
+sound/
+music/
+script/
+ghidra-project/

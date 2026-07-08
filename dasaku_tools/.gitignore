@@ -1,0 +1,9 @@
+__pycache__
+game/
+images/
+sound/
+script/
+libraries/.working/
+libraries/vwfhook/vwf_font.h
+libraries/VNTextPatch/VNTextPatch.exe.config.orig
+ghidra-project/
