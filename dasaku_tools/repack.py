@@ -1,10 +1,10 @@
-"""Repack assets into the game and patch the executable. Default scope is -e -s (VWF hook + scripts).
+"""Repack game assets. Default scope is -s (scripts).
 
 Usage:
-  python repack.py                          Repack scripts + VWF hook (default)
+  python repack.py                          Repack scripts (default)
   python repack.py -p "path/to/game"        Specify the game directory
   python repack.py -s [text|ui ...]         Scripts only (with optional subsets)
-  python repack.py -e                       Build VWF hook
+  python repack.py -e                       Build and deploy the VWF hook only
   python repack.py -i [PACK ...]            Images only (with optional target files)
   python repack.py -a [GROUP ...]           Audio only (with optional target group)
 """

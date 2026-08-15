@@ -20,6 +20,17 @@ Python 3.7+
 By default, extract/repack only target the scripts. Pass `-i`/`-a` to also process
 images/audio — these archives are large, so repacking them takes significantly longer.
 
+The tools can live outside the game folder. Point both commands at that folder with
+`-p` (quotes allow paths containing spaces):
+
+```powershell
+python extract.py -p "C:\Games\Etsuraku no Tane"
+# Edit script\*.json and script\_names.json in the game folder.
+python repack.py -p "C:\Games\Etsuraku no Tane"
+```
+
+These commands still process scripts only unless an asset flag is supplied explicitly.
+
 ## Flags
 
 | Flag | Long form       | Applies to | Description                                                    |

@@ -10,7 +10,7 @@ if __name__ == '__main__':
         sys.argv[1:],
         value_flags=('--cols',),
         optint_flags=('--vspace',),
-        bool_flags=('--scripts', '--image', '--voice', '--sound', '--music',
+        bool_flags=('--scripts', '--system', '--image', '--voice', '--sound', '--music',
                     '--exe-only', '--show', '--restore-exe', '--compress'),
         aliases={'-s': '--scripts', '-i': '--image', '-v': '--vspace', '-c': '--cols'})
     pv = opts.get('--vspace')

@@ -12,12 +12,13 @@ Includes a variable-width font hook/override with `ddraw.dll`.
 ## How to use
 
 1. Put this repo at the game root (or pass the game folder with `-p`).
-2. Run `python extract.py` to pull the text into `script\*.json`.
+2. Run `python extract.py` (or `python extract.py -p "path/to/game"`) to pull the text into `script\*.json`.
 3. Edit the assets you want:
    - scenario text in `script\<route>.json`
    - speaker names in `script\names.json`, UI strings in `script\{config,charaname,namecol}.json`,
    - images in `images\<pack>\` (after `extract.py -i`), audio in `sound\<group>\` (after `extract.py -a`).
-4. Run `python repack.py` to repack the text and build the VWF hook.
+4. Run `python repack.py` (or `python repack.py -p "path/to/game"`) to repack the text.
+   Add `-e` when you also want to build and deploy the VWF hook.
 
 ## Additional Parameters
 
@@ -30,7 +31,8 @@ Includes a variable-width font hook/override with `ddraw.dll`.
 | `-e` | `--exe`    | repack     | Build + deploy the VWF hook (`ddraw.dll`).                               |
 | `-f` | `--force`  | extract    | Overwrite existing extracted files.                                      |
 
-Scopes can be combined. The default flow is `-s -e` (scripts + VWF hook).
+Scopes can be combined. The default flow is `-s` (scripts only); images, audio, and
+the VWF hook are opt-in via `-i`, `-a`, and `-e`, respectively.
 
 ## Custom font
 

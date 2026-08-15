@@ -28,6 +28,7 @@ MEDIA = {
     'music': ('music', '*.ovd'),   # Ogg BGM
 }
 CONTENT = ('scripts', 'system') + tuple(MEDIA)
+DEFAULT_CONTENT = frozenset(('scripts',))
 
 PKG_DIR  = os.path.dirname(os.path.abspath(__file__))   # .../game/libraries
 TOOL_DIR = os.path.dirname(PKG_DIR)                      # .../game
@@ -93,7 +94,7 @@ def parse_args(argv, value_flags=(), bool_flags=(), optint_flags=(), aliases=Non
 
 def select_content(opts):
     sel = {t for t in CONTENT if opts.get('--' + t)}
-    return sel or set(CONTENT)
+    return sel or set(DEFAULT_CONTENT)
 
 def backup_once(path, game_dir):
     """Backup original file if .orig not already present."""
@@ -103,15 +104,16 @@ def backup_once(path, game_dir):
         print('  captured pristine backup -> %s' % os.path.relpath(bak, game_dir))
     return bak
 
-def ensure_workspace(game_dir, archive_name=SCRIPT_NAME):
+def ensure_workspace(game_dir, archive_name=SCRIPT_NAME, backup_exe=False):
     archive = _p(game_dir, archive_name)
     if not os.path.exists(archive):
         sys.exit('!! no %s in %s -- is this the game folder? (pass the game path as an arg)'
                  % (archive_name, game_dir))
     pristine = backup_once(archive, game_dir)
-    exe = _p(game_dir, EXE_NAME)
-    if os.path.exists(exe):
-        backup_once(exe, game_dir)
+    if backup_exe:
+        exe = _p(game_dir, EXE_NAME)
+        if os.path.exists(exe):
+            backup_once(exe, game_dir)
     ensure_working(game_dir)
     scenes = _p(game_dir, SCENES_SUB)
     if not glob.glob(os.path.join(scenes, '*.BIN')):
@@ -121,8 +123,8 @@ def ensure_workspace(game_dir, archive_name=SCRIPT_NAME):
 
 def do_extract(game_dir, sel=None, archive_name=SCRIPT_NAME, force=False):
     game_dir = resolve_dir(game_dir)
-    sel = sel or set(CONTENT)
-    ensure_workspace(game_dir, archive_name)
+    sel = set(DEFAULT_CONTENT) if sel is None else set(sel)
+    ensure_workspace(game_dir, archive_name, backup_exe='system' in sel)
 
     if 'scripts' in sel:
         print('[scripts] scene text -> %s%s' % (SCRIPT_DIR, '  (--force)' if force else ''))
@@ -210,8 +212,9 @@ def _build_exe(game_dir, sel, pitch):
 def do_repack(game_dir, sel=None, archive_name=SCRIPT_NAME, cols=scenetext.LINE_COLS,
               pitch=None, compress=False):
     game_dir = resolve_dir(game_dir)
-    sel = sel or set(CONTENT)
-    pristine = ensure_workspace(game_dir, archive_name)
+    sel = set(DEFAULT_CONTENT) if sel is None else set(sel)
+    pristine = ensure_workspace(
+        game_dir, archive_name, backup_exe='system' in sel or pitch is not None)
 
     if 'scripts' in sel:
         patched = _p(game_dir, PATCHED_SUB)

@@ -8,7 +8,7 @@ if __name__ == '__main__':
     else:
         game_dir, opts = workspace.parse_args(
             sys.argv[1:],
-            bool_flags=('--force', '--scripts', '--image', '--voice', '--sound', '--music'),
+            bool_flags=('--force', '--scripts', '--system', '--image', '--voice', '--sound', '--music'),
             aliases={'-s': '--scripts', '-i': '--image', '-f': '--force'})
         workspace.do_extract(game_dir,
                              sel=workspace.select_content(opts),

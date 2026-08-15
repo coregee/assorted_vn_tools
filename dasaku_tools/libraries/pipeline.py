@@ -167,8 +167,8 @@ def _resolve(val, allowed, label):
 
 
 def select_content(opts, steps_all, with_exe=False):
-    """Resolve parsed opts into a scope plan. No scope flag -> default -s (+ exe for repack);
-    any explicit scope flag (and -e) overrides the default to exactly what was named."""
+    """Resolve parsed opts into a scope plan. No scope flag defaults to scripts only;
+    any explicit scope flag (including -e) selects exactly what was named."""
     explicit = any(opts[k] is not False for k in ('--script', '--image', '--audio'))
     if with_exe:
         explicit = explicit or opts['--exe']
@@ -179,7 +179,7 @@ def select_content(opts, steps_all, with_exe=False):
         sel['image'] = _resolve(opts['--image'], ALL_PACKS, 'pack')
     if opts['--audio'] is not False:
         sel['audio'] = _resolve(opts['--audio'], ALL_SOUND, 'audio group')
-    if with_exe and (opts['--exe'] or not explicit):
+    if with_exe and opts['--exe']:
         sel['exe'] = True
     return sel
 
