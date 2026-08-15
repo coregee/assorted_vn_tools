@@ -1,0 +1,297 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>VN Translation Workbench</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <a class="skip-link" href="#workspace">Skip to editor</a>
+
+  <header class="topbar">
+    <div class="brand" aria-label="VN Translation Workbench">
+      <span class="brand-mark" aria-hidden="true">文</span>
+      <div>
+        <strong>Translation Workbench</strong>
+        <span>Local script editor</span>
+      </div>
+    </div>
+
+    <div class="topbar-project" aria-live="polite">
+      <span class="status-dot" id="connection-dot" aria-hidden="true"></span>
+      <span id="project-label">No project open</span>
+    </div>
+
+    <nav class="topbar-actions" aria-label="Application actions">
+      <button class="button button-quiet button-icon" id="shortcuts-button" type="button" aria-label="Keyboard shortcuts" title="Keyboard shortcuts">?</button>
+      <button class="button button-secondary" id="settings-button" type="button">
+        <span aria-hidden="true">&#9881;</span>
+        Settings
+      </button>
+    </nav>
+  </header>
+
+  <div class="error-banner" id="error-banner" role="alert" hidden>
+    <div>
+      <strong id="error-title">Something went wrong</strong>
+      <p id="error-message"></p>
+    </div>
+    <button class="button button-quiet button-icon" id="dismiss-error" type="button" aria-label="Dismiss error">&#215;</button>
+  </div>
+
+  <main class="app-layout" id="workspace">
+    <aside class="sidebar" aria-label="Project files">
+      <form class="open-project" id="open-project-form">
+        <label for="project-path">Extracted game folder</label>
+        <div class="input-action">
+          <input id="project-path" name="path" type="text" autocomplete="off" spellcheck="false" placeholder="C:\Games\Example\scripts" required>
+          <button class="button button-primary" id="open-project-button" type="submit">Open</button>
+        </div>
+        <p class="field-help">Enter a game folder containing <code>script/</code>, or the extracted <code>script</code> folder itself.</p>
+      </form>
+
+      <section class="project-summary" id="project-summary" aria-label="Project summary" hidden>
+        <p class="eyebrow">Project</p>
+        <p class="project-path" id="project-path-label" title=""></p>
+        <dl class="stats-grid">
+          <div>
+            <dt>Files</dt>
+            <dd id="stat-files">0</dd>
+          </div>
+          <div>
+            <dt>Lines</dt>
+            <dd id="stat-lines">0</dd>
+          </div>
+          <div>
+            <dt>Translated</dt>
+            <dd id="stat-translated">0</dd>
+          </div>
+        </dl>
+        <div class="progress-track" aria-hidden="true">
+          <span id="project-progress" style="width: 0%"></span>
+        </div>
+        <p class="completion-label" id="completion-label">0% translated</p>
+      </section>
+
+      <section class="file-browser" id="file-browser" hidden>
+        <div class="section-heading">
+          <label for="file-filter">Script files</label>
+          <span id="file-count" aria-live="polite"></span>
+        </div>
+        <div class="search-input">
+          <span aria-hidden="true">&#128269;</span>
+          <input id="file-filter" type="search" autocomplete="off" placeholder="Filter files…">
+        </div>
+        <nav class="file-list" id="file-list" aria-label="Script files"></nav>
+        <p class="empty-list" id="no-files" hidden>No matching script files.</p>
+      </section>
+    </aside>
+
+    <section class="editor-shell">
+      <div class="welcome-state" id="welcome-state">
+        <div class="welcome-illustration" aria-hidden="true">
+          <span>あ</span><span>A</span>
+        </div>
+        <h1>Open an extracted game folder</h1>
+        <p>Review JSON script lines, translate them with your local LM Studio model, and keep every edit under your control.</p>
+        <button class="button button-primary" id="focus-path-button" type="button">Choose a folder path</button>
+      </div>
+
+      <div class="editor" id="editor" hidden>
+        <header class="editor-header">
+          <div class="file-heading">
+            <p class="eyebrow">Current script</p>
+            <h1 id="active-file-name">Select a file</h1>
+            <p id="active-file-path"></p>
+          </div>
+          <div class="save-area">
+            <span class="save-state" id="save-state" aria-live="polite">Saved</span>
+            <button class="button button-primary" id="save-button" type="button" disabled>Save changes</button>
+          </div>
+        </header>
+
+        <div class="editor-toolbar" aria-label="Translation controls">
+          <div class="selection-controls">
+            <span class="toolbar-label"><strong id="selection-count">0</strong> selected</span>
+            <button class="text-button" id="select-untranslated" type="button">Untranslated</button>
+            <button class="text-button" id="select-all" type="button">All</button>
+            <button class="text-button" id="select-none" type="button">Clear</button>
+          </div>
+          <div class="translate-controls">
+            <button class="button button-primary" id="review-suggestions" type="button" hidden>Review suggestions</button>
+            <button class="button button-secondary" id="translate-selected" type="button" disabled>Translate selected</button>
+            <button class="button button-secondary" id="translate-untranslated" type="button">Translate untranslated</button>
+            <button class="button button-quiet" id="translate-file" type="button">Re-translate file</button>
+          </div>
+        </div>
+
+        <div class="line-filter-row">
+          <label class="search-input line-search" for="line-filter">
+            <span aria-hidden="true">&#128269;</span>
+            <input id="line-filter" type="search" autocomplete="off" placeholder="Find source, speaker, or translation…">
+          </label>
+          <span id="visible-line-count" aria-live="polite"></span>
+        </div>
+
+        <section class="job-panel" id="job-panel" aria-live="polite" hidden>
+          <div class="job-heading">
+            <div>
+              <strong id="job-title">Translating with LM Studio</strong>
+              <span id="job-message">Preparing context…</span>
+            </div>
+            <button class="button button-quiet" id="cancel-job" type="button">Cancel</button>
+          </div>
+          <div class="progress-track job-progress" role="progressbar" id="job-progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+            <span id="job-progress" style="width: 0%"></span>
+          </div>
+        </section>
+
+        <div class="line-list" id="line-list" aria-label="Script lines"></div>
+        <div class="empty-lines" id="empty-lines" hidden>
+          <strong>No lines found</strong>
+          <p>Try clearing the line filter or choose another script.</p>
+        </div>
+      </div>
+    </section>
+
+    <aside class="review-panel" id="review-panel" aria-label="Translation suggestions" hidden>
+      <header class="review-header">
+        <div>
+          <p class="eyebrow">Review</p>
+          <h2>Proposed translations</h2>
+          <p id="suggestion-summary">0 suggestions</p>
+        </div>
+        <button class="button button-quiet button-icon" id="close-review" type="button" aria-label="Close suggestions">&#215;</button>
+      </header>
+      <div class="review-actions">
+        <button class="button button-primary" id="accept-all" type="button">Accept all</button>
+        <button class="button button-quiet" id="reject-all" type="button">Reject all</button>
+      </div>
+      <div class="suggestion-list" id="suggestion-list"></div>
+      <div class="review-empty" id="review-empty" hidden>
+        <strong>Review complete</strong>
+        <p>Accepted translations are staged as unsaved edits.</p>
+      </div>
+    </aside>
+  </main>
+
+  <footer class="statusbar">
+    <span id="app-status" role="status" aria-live="polite">Ready</span>
+    <span><kbd>Ctrl</kbd> + <kbd>S</kbd> save &middot; <kbd>Ctrl</kbd> + <kbd>Enter</kbd> translate selected &middot; <kbd>Ctrl</kbd> + <kbd>K</kbd> find files</span>
+  </footer>
+
+  <dialog class="settings-dialog" id="settings-dialog" aria-labelledby="settings-title">
+    <form id="settings-form">
+      <header class="dialog-header">
+        <div>
+          <p class="eyebrow">Local inference</p>
+          <h2 id="settings-title">Translation settings</h2>
+          <p>These settings are sent only to the local translation server.</p>
+        </div>
+        <button class="button button-quiet button-icon dialog-close" type="button" aria-label="Close settings">&#215;</button>
+      </header>
+
+      <div class="settings-content">
+        <section class="settings-section" aria-labelledby="connection-title">
+          <div class="settings-section-heading">
+            <div>
+              <h3 id="connection-title">LM Studio connection</h3>
+              <p>Use LM Studio's OpenAI-compatible local server.</p>
+            </div>
+            <button class="button button-secondary" id="load-models" type="button">Load models</button>
+          </div>
+          <div class="form-grid">
+            <label class="field field-wide">
+              <span>Base URL</span>
+              <input id="setting-base-url" name="base_url" type="url" placeholder="http://127.0.0.1:1234/v1" required>
+            </label>
+            <label class="field field-wide">
+              <span>Model</span>
+              <input id="setting-model" name="model" type="text" list="models-list" autocomplete="off" placeholder="Select or enter a model ID" required>
+              <datalist id="models-list"></datalist>
+              <small id="models-status" aria-live="polite"></small>
+            </label>
+            <label class="field">
+              <span>Target language</span>
+              <input id="setting-target-language" name="target_language" type="text" placeholder="English" required>
+            </label>
+            <label class="field">
+              <span>Batch size</span>
+              <input id="setting-batch-size" name="batch_size" type="number" min="1" max="100" step="1" required>
+            </label>
+            <label class="field">
+              <span>Context before</span>
+              <input id="setting-context-before" name="context_before" type="number" min="0" max="200" step="1" required>
+            </label>
+            <label class="field">
+              <span>Context after</span>
+              <input id="setting-context-after" name="context_after" type="number" min="0" max="200" step="1" required>
+            </label>
+            <label class="field">
+              <span>Temperature</span>
+              <input id="setting-temperature" name="temperature" type="number" min="0" max="2" step="0.05" required>
+            </label>
+            <label class="field">
+              <span>Max response tokens</span>
+              <input id="setting-max-tokens" name="max_tokens" type="number" min="64" max="131072" step="64" required>
+            </label>
+            <label class="checkbox-field field-wide">
+              <input id="setting-allow-remote" name="allow_remote_lmstudio" type="checkbox">
+              <span>Allow a non-local LM Studio host. Enable only for a server you trust; game text and context will be sent to it.</span>
+            </label>
+          </div>
+        </section>
+
+        <section class="settings-section" aria-labelledby="context-title">
+          <h3 id="context-title">Game context</h3>
+          <p>Tell the model about the story, cast, terminology, tone, and preferred name spellings.</p>
+          <label class="field">
+            <span class="sr-only">Game context</span>
+            <textarea id="setting-game-context" name="game_context" rows="8" placeholder="Example: A modern mystery visual novel. Haruka speaks formally; Ren is sarcastic. Keep honorifics…"></textarea>
+          </label>
+        </section>
+
+        <section class="settings-section" aria-labelledby="prompt-title">
+          <h3 id="prompt-title">System prompt</h3>
+          <p>Set translation rules. The server adds historical context and delimited source lines for each batch.</p>
+          <label class="field">
+            <span class="sr-only">System prompt</span>
+            <textarea id="setting-system-prompt" name="system_prompt" rows="10" placeholder="You are a professional visual novel translator…"></textarea>
+          </label>
+        </section>
+      </div>
+
+      <footer class="dialog-footer">
+        <span class="dialog-status" id="settings-status" aria-live="polite"></span>
+        <button class="button button-quiet dialog-close" type="button">Cancel</button>
+        <button class="button button-primary" id="save-settings" type="submit">Save settings</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <dialog class="shortcuts-dialog" id="shortcuts-dialog" aria-labelledby="shortcuts-title">
+    <header class="dialog-header">
+      <div>
+        <p class="eyebrow">Reference</p>
+        <h2 id="shortcuts-title">Keyboard shortcuts</h2>
+      </div>
+      <button class="button button-quiet button-icon dialog-close" type="button" aria-label="Close shortcuts">&#215;</button>
+    </header>
+    <dl class="shortcut-list">
+      <div><dt><kbd>Ctrl</kbd> + <kbd>S</kbd></dt><dd>Save current file</dd></div>
+      <div><dt><kbd>Ctrl</kbd> + <kbd>Enter</kbd></dt><dd>Translate selected lines</dd></div>
+      <div><dt><kbd>Ctrl</kbd> + <kbd>K</kbd></dt><dd>Focus file search</dd></div>
+      <div><dt><kbd>Alt</kbd> + <kbd>A</kbd></dt><dd>Select all translatable lines</dd></div>
+      <div><dt><kbd>Esc</kbd></dt><dd>Close the active dialog or review panel</dd></div>
+    </dl>
+    <footer class="dialog-footer">
+      <button class="button button-primary dialog-close" type="button">Done</button>
+    </footer>
+  </dialog>
+
+  <noscript>This editor requires JavaScript. Enable it and reload the page.</noscript>
+  <script src="/app.js" defer></script>
+</body>
+</html>
