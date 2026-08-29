@@ -18,8 +18,8 @@ of translating lines in isolation. Do not add explanations. Preserve every engin
 exactly, including literal \\xHH and «HH» tokens. Return only the requested JSON object and
 one translation for every target ID, in the same order."""
 
-HISTORY_MAX_MESSAGES = 16
-HISTORY_MAX_CHARS = 24000
+MESSAGE_OVERHEAD_TOKENS = 12
+MIN_RESPONSE_TOKENS = 64
 
 
 class TranslationError(Exception):
@@ -131,9 +131,13 @@ def select_lines(files: Sequence[Mapping[str, Any]],
 
 def make_batches(files: Sequence[Mapping[str, Any]],
                  selected: Sequence[Tuple[Mapping[str, Any], Mapping[str, Any]]],
-                 batch_size: int, context_before: int,
-                 context_after: int) -> List[TranslationBatch]:
-    """Create chronological, file-local batches; split very sparse selections."""
+                 batch_mode: str = "messages", batch_limit: int = 1,
+                 ) -> List[TranslationBatch]:
+    """Create chronological turns bounded by message count or source characters."""
+    if batch_mode not in ("messages", "characters"):
+        raise TranslationError("batch_mode must be 'messages' or 'characters'")
+    if isinstance(batch_limit, bool) or not isinstance(batch_limit, int) or batch_limit < 1:
+        raise TranslationError("batch_limit must be a positive integer")
     by_file: Dict[str, List[Mapping[str, Any]]] = {}
     data_by_file: Dict[str, Mapping[str, Any]] = {}
     for file_data, line in selected:
@@ -143,18 +147,26 @@ def make_batches(files: Sequence[Mapping[str, Any]],
 
     ordered_paths = [file_data["path"] for file_data in files if file_data["path"] in by_file]
     batches: List[TranslationBatch] = []
-    proximity = max(2, context_before + context_after + 1)
     for path in ordered_paths:
         targets = sorted(by_file[path], key=lambda line: line["index"])
-        group: List[Mapping[str, Any]] = []
+        pending: List[Mapping[str, Any]] = []
+        pending_characters = 0
         for target in targets:
-            too_far = bool(group and target["index"] - group[-1]["index"] > proximity)
-            if group and (len(group) >= batch_size or too_far):
-                batches.append(TranslationBatch(path, data_by_file[path]["lines"], tuple(group)))
-                group = []
-            group.append(target)
-        if group:
-            batches.append(TranslationBatch(path, data_by_file[path]["lines"], tuple(group)))
+            target_characters = len(str(target.get("source", "")))
+            if batch_mode == "messages":
+                full = len(pending) >= batch_limit
+            else:
+                full = bool(pending) and pending_characters + target_characters > batch_limit
+            if full:
+                batches.append(TranslationBatch(
+                    path, data_by_file[path]["lines"], tuple(pending)))
+                pending = []
+                pending_characters = 0
+            pending.append(target)
+            pending_characters += target_characters
+        if pending:
+            batches.append(TranslationBatch(
+                path, data_by_file[path]["lines"], tuple(pending)))
     return batches
 
 
@@ -207,25 +219,33 @@ def _display_line(line: Mapping[str, Any], role: str,
     return "\n".join(parts)
 
 
-def batch_prompt(batch: TranslationBatch, context_before: int, context_after: int,
+def batch_prompt(batch: TranslationBatch, context_start: int,
                  suggested: Mapping[str, str],
-                 glossary: Optional[Mapping[str, str]] = None) -> str:
+                 glossary: Optional[Mapping[str, str]] = None,
+                 omitted_references: int = 0) -> str:
+    """Build the next chronological turn, including lines unseen by this conversation."""
     target_ids = {line["id"] for line in batch.targets}
-    first = batch.targets[0]["index"]
     last = batch.targets[-1]["index"]
-    start = max(0, first - context_before)
-    end = min(len(batch.all_lines), last + context_after + 1)
-    context = [line for line in batch.all_lines[start:end] if line["id"] not in target_ids]
+    chronological = [line for line in batch.all_lines
+                     if context_start <= line["index"] <= last]
+    references = [line for line in chronological if line["id"] not in target_ids]
+    omitted_ids = {line["id"] for line in references[:omitted_references]}
     blocks = [
         "FILE: " + batch.file_path,
-        "The REFERENCE lines are chronological context only; do not return them.",
+        "This is the next chronological part of the file. REFERENCE lines are context only; "
+        "do not return them.",
         "Translate every TARGET line in the listed order.",
     ]
-    if context:
-        blocks.append("\n".join(_display_line(line, "REFERENCE", suggested, glossary)
-                                for line in context))
-    blocks.append("\n".join(_display_line(line, "TARGET", suggested, glossary)
-                            for line in batch.targets))
+    if omitted_ids:
+        blocks.append("[%d older reference line%s omitted to fit the context window.]" %
+                      (len(omitted_ids), "" if len(omitted_ids) == 1 else "s"))
+    displayed = []
+    for line in chronological:
+        if line["id"] in omitted_ids:
+            continue
+        role = "TARGET" if line["id"] in target_ids else "REFERENCE"
+        displayed.append(_display_line(line, role, suggested, glossary))
+    blocks.append("\n".join(displayed))
     blocks.append(
         'Return exactly: {"translations":[{"id":"the exact target ID",'
         '"translation":"translated text"}, ...]}. Preserve all engine tokens verbatim.'
@@ -233,16 +253,83 @@ def batch_prompt(batch: TranslationBatch, context_before: int, context_after: in
     return "\n\n".join(blocks)
 
 
-def trim_history(history: Sequence[Mapping[str, str]]) -> List[Dict[str, str]]:
-    """Keep system context plus a bounded sliding window of complete chat pairs."""
-    if not history:
+def estimate_message_tokens(messages: Sequence[Mapping[str, str]]) -> int:
+    """Return a conservative, tokenizer-independent upper bound for chat content.
+
+    A byte-fallback tokenizer cannot require more tokens than the text has UTF-8 bytes,
+    so counting one token per byte deliberately errs toward trimming too early. The
+    fixed allowance covers role markers and the model's chat template.
+    """
+    return sum(len(message.get("content", "").encode("utf-8")) +
+               MESSAGE_OVERHEAD_TOKENS for message in messages)
+
+
+def response_token_budget(context_window: int, reserve_percent: int) -> int:
+    return max(MIN_RESPONSE_TOKENS, context_window * reserve_percent // 100)
+
+
+def _trim_old_turns(messages: Sequence[Mapping[str, str]], prompt_limit: int,
+                    preserve_tail: int) -> List[Dict[str, str]]:
+    """Drop oldest complete user/assistant turns while preserving the system and tail."""
+    if not messages:
         return []
-    system = dict(history[0])
-    tail = [dict(message) for message in history[1:]]
-    while len(tail) > HISTORY_MAX_MESSAGES or sum(len(m.get("content", "")) for m in tail) > HISTORY_MAX_CHARS:
-        # Stored history is appended as complete user/assistant pairs, including repair pairs.
-        del tail[:min(2, len(tail))]
-    return [system] + tail
+    system = dict(messages[0])
+    tail_start = max(1, len(messages) - preserve_tail)
+    history = [dict(message) for message in messages[1:tail_start]]
+    required = [dict(message) for message in messages[tail_start:]]
+    while history and estimate_message_tokens([system] + history + required) > prompt_limit:
+        del history[:min(2, len(history))]
+    fitted = [system] + history + required
+    if estimate_message_tokens(fitted) > prompt_limit:
+        raise TranslationError(
+            "the system prompt and current translation turn exceed the configured context window; "
+            "increase the context window or shorten the prompt text"
+        )
+    return fitted
+
+
+def fit_batch_request(history: Sequence[Mapping[str, str]], batch: TranslationBatch,
+                      context_start: int, suggested: Mapping[str, str],
+                      glossary: Optional[Mapping[str, str]],
+                      prompt_limit: int) -> List[Dict[str, str]]:
+    """Fit a chronological batch turn, trimming oldest turns and reference lines first."""
+    user_content = batch_prompt(batch, context_start, suggested, glossary)
+    candidate = [dict(message) for message in history] + [
+        {"role": "user", "content": user_content}
+    ]
+
+    # Previous completed turns are older than every line in this new turn.
+    try:
+        return _trim_old_turns(candidate, prompt_limit, preserve_tail=1)
+    except TranslationError:
+        pass
+
+    target_ids = {target["id"] for target in batch.targets}
+    reference_count = sum(
+        line["id"] not in target_ids
+        for line in batch.all_lines
+        if context_start <= line["index"] <= batch.targets[-1]["index"]
+    )
+    # At this point all removable completed turns have already been discarded. Drop the
+    # oldest reference lines from the current turn until its targets fit.
+    base_history = [dict(history[0])]
+    low, high = 0, reference_count
+    fitted_result: Optional[List[Dict[str, str]]] = None
+    while low <= high:
+        omitted = (low + high) // 2
+        content = batch_prompt(batch, context_start, suggested, glossary, omitted)
+        request = base_history + [{"role": "user", "content": content}]
+        if estimate_message_tokens(request) <= prompt_limit:
+            fitted_result = request
+            high = omitted - 1
+        else:
+            low = omitted + 1
+    if fitted_result is None:
+        raise TranslationError(
+            "the system prompt and target lines exceed the configured context window; "
+            "increase the context window or shorten the prompt text"
+        )
+    return fitted_result
 
 
 class TranslationEngine:
@@ -273,10 +360,16 @@ class TranslationEngine:
         selected = select_lines(files, file_paths, line_ids)
         if not selected:
             return []
-        batch_size = int(settings["batch_size"])
-        context_before = int(settings["context_before"])
-        context_after = int(settings["context_after"])
-        batches = make_batches(files, selected, batch_size, context_before, context_after)
+        context_window = int(settings["context_window"])
+        reserve_percent = int(settings["response_reserve_percent"])
+        max_tokens = response_token_budget(context_window, reserve_percent)
+        prompt_limit = context_window - max_tokens
+        batches = make_batches(
+            files,
+            selected,
+            settings.get("batch_mode", "messages"),
+            settings.get("batch_limit", 1),
+        )
         total = len(selected)
         done = 0
         suggestions: List[Dict[str, Any]] = []
@@ -285,6 +378,7 @@ class TranslationEngine:
         structured_supported = True
         current_file: Optional[str] = None
         history: List[Dict[str, str]] = []
+        context_start = 0
 
         custom_prompt = settings.get("system_prompt") or DEFAULT_SYSTEM_PROMPT
         custom_prompt = custom_prompt.replace("{target_language}", settings["target_language"])
@@ -298,21 +392,18 @@ class TranslationEngine:
                 raise TranslationCancelled("translation cancelled")
             if batch.file_path != current_file:
                 # Script filenames are not guaranteed to have story-contiguous ordering.
-                # Retain dialogue history across batches only within the same file.
+                # Retain dialogue history across turns only within the same file.
                 history = [{"role": "system", "content": system_content}]
                 current_file = batch.file_path
-            history = trim_history(history)
-            user_content = batch_prompt(batch, context_before, context_after, suggested, glossary)
-            request_messages = history + [{"role": "user", "content": user_content}]
+                context_start = 0
+            request_messages = fit_batch_request(
+                history, batch, context_start, suggested, glossary, prompt_limit)
             raw, structured_supported = self._complete(
                 request_messages, settings["model"], float(settings["temperature"]),
-                int(settings["max_tokens"]), structured_supported)
+                max_tokens, structured_supported)
             try:
                 parsed = parse_translation_response(raw, batch.targets)
-                history.extend((
-                    {"role": "user", "content": user_content},
-                    {"role": "assistant", "content": raw},
-                ))
+                history = request_messages + [{"role": "assistant", "content": raw}]
             except TranslationError as first_error:
                 if cancelled and cancelled():
                     raise TranslationCancelled("translation cancelled")
@@ -321,24 +412,22 @@ class TranslationEngine:
                     "exact JSON object, with every requested ID once and in order. Preserve every "
                     "engine token from its source line." % first_error
                 )
-                repair_messages = request_messages + [
+                repair_messages = _trim_old_turns(request_messages + [
                     {"role": "assistant", "content": raw},
                     {"role": "user", "content": repair},
-                ]
+                ], prompt_limit, preserve_tail=3)
                 repaired, structured_supported = self._complete(
                     repair_messages, settings["model"], float(settings["temperature"]),
-                    int(settings["max_tokens"]), structured_supported)
+                    max_tokens, structured_supported)
                 try:
                     parsed = parse_translation_response(repaired, batch.targets)
                 except TranslationError as second_error:
                     raise TranslationError("model response stayed invalid after one repair: %s" %
                                            second_error) from second_error
-                history.extend((
-                    {"role": "user", "content": user_content},
-                    {"role": "assistant", "content": raw},
-                    {"role": "user", "content": repair},
+                # Future context only needs the valid canonical turn, not repair chatter.
+                history = request_messages + [
                     {"role": "assistant", "content": repaired},
-                ))
+                ]
 
             targets_by_id = {line["id"]: line for line in batch.targets}
             for row in parsed:
@@ -357,6 +446,7 @@ class TranslationEngine:
                     "kind": line.get("kind"),
                 })
             done += len(parsed)
+            context_start = batch.targets[-1]["index"] + 1
             if progress:
                 progress(done, total, batch_number, len(batches))
         return suggestions

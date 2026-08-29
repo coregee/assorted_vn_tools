@@ -157,12 +157,49 @@ class ServerIntegrationTests(unittest.TestCase):
         self.assertEqual(400, status)
         self.assertIn("loopback", payload["error"]["message"])
 
+    def test_batch_and_context_settings_are_validated(self):
+        self.open_project()
+        _status, settings, _headers = self.request(
+            "/api/settings",
+            "PUT",
+            {
+                "batch_mode": "characters",
+                "batch_limit": 200,
+                "context_window": 65536,
+                "response_reserve_percent": 15,
+            },
+        )
+        self.assertEqual("characters", settings["batch_mode"])
+        self.assertEqual(200, settings["batch_limit"])
+        self.assertEqual(65536, settings["context_window"])
+        self.assertEqual(15, settings["response_reserve_percent"])
+
+        status, payload = self.error(
+            "/api/settings",
+            "PUT",
+            {"response_reserve_percent": 51},
+        )
+        self.assertEqual(400, status)
+        self.assertIn("between 5 and 50", payload["error"]["message"])
+
+        status, payload = self.error(
+            "/api/settings",
+            "PUT",
+            {"batch_mode": "tokens"},
+        )
+        self.assertEqual(400, status)
+        self.assertIn("messages", payload["error"]["message"])
+
     @mock.patch("llm_translation_tools.server.LMStudioClient", FakeLMStudioClient)
-    def test_job_returns_review_suggestions_without_saving_them(self):
+    def test_job_writes_multiple_files_in_sequence(self):
+        (self.script / "scene_b.json").write_text(
+            json.dumps([
+                {"message": "次の場面。", "translated": None},
+            ], ensure_ascii=False, indent=1),
+            encoding="utf-8",
+        )
         opened = self.open_project()
-        path = opened["files"][0]["path"]
-        snapshot = self.request("/api/file?" + urllib.parse.urlencode({"path": path}))[1]
-        target_id = snapshot["lines"][0]["id"]
+        paths = [item["path"] for item in opened["files"]]
 
         self.request(
             "/api/settings",
@@ -172,7 +209,7 @@ class ServerIntegrationTests(unittest.TestCase):
         _status, created, _headers = self.request(
             "/api/jobs",
             "POST",
-            {"files": [path], "line_ids": [target_id]},
+            {"files": paths},
         )
         job_id = created["id"]
         deadline = time.monotonic() + 5
@@ -185,12 +222,15 @@ class ServerIntegrationTests(unittest.TestCase):
             self.fail("translation job did not finish")
 
         self.assertEqual("completed", job["status"], job.get("error"))
+        self.assertEqual(paths, job["written_files"])
         result = self.request("/api/jobs/%s/result" % job_id)[1]
-        self.assertEqual(target_id, result["suggestions"][0]["id"])
+        self.assertEqual(3, len(result["suggestions"]))
         self.assertEqual("Translated line 1", result["suggestions"][0]["suggestion"])
 
-        unchanged = self.request("/api/file?" + urllib.parse.urlencode({"path": path}))[1]
-        self.assertIsNone(unchanged["lines"][0]["translation"])
+        first = self.request("/api/file?" + urllib.parse.urlencode({"path": paths[0]}))[1]
+        second = self.request("/api/file?" + urllib.parse.urlencode({"path": paths[1]}))[1]
+        self.assertTrue(all(line["translation"] for line in first["lines"]))
+        self.assertEqual("Translated line 1", second["lines"][0]["translation"])
         self.assertEqual(200, self.request(
             "/api/jobs/%s/cancel" % job_id,
             "POST",

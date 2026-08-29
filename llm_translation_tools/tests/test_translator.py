@@ -16,10 +16,10 @@ SETTINGS = {
     "game_context": "A mystery. Hana is formal and Taro is terse.",
     "target_language": "English",
     "temperature": 0.2,
-    "max_tokens": 512,
-    "batch_size": 1,
-    "context_before": 1,
-    "context_after": 1,
+    "batch_mode": "messages",
+    "batch_limit": 1,
+    "context_window": 8192,
+    "response_reserve_percent": 25,
 }
 
 
@@ -66,6 +66,15 @@ def response_for(line_id, translation):
     }, ensure_ascii=False)
 
 
+def response_for_many(rows):
+    return json.dumps({
+        "translations": [
+            {"id": target["id"], "translation": translation}
+            for target, translation in rows
+        ],
+    }, ensure_ascii=False)
+
+
 class ResponseValidationTests(unittest.TestCase):
     def test_preserves_exact_ids_order_and_engine_tokens(self):
         expected = [line("script/a.json", 0, "待って\\x81 «FE»")]
@@ -88,6 +97,53 @@ class ResponseValidationTests(unittest.TestCase):
 
 
 class TranslationCycleTests(unittest.TestCase):
+    def test_batches_by_message_count_without_crossing_file_boundaries(self):
+        path = "script/a.json"
+        lines = [line(path, index, source) for index, source in enumerate(("一", "二", "三"))]
+        client = RecordingClient([
+            response_for_many(((lines[0], "One."), (lines[1], "Two."))),
+            response_for(lines[2]["id"], "Three."),
+        ])
+
+        result = TranslationEngine(client).translate(
+            [{"path": path, "lines": lines}],
+            {**SETTINGS, "batch_limit": 2},
+        )
+
+        self.assertEqual(3, len(result))
+        self.assertEqual(2, len(client.calls))
+        self.assertIn(lines[0]["id"], client.calls[0]["messages"][-1]["content"])
+        self.assertIn(lines[1]["id"], client.calls[0]["messages"][-1]["content"])
+        self.assertNotIn(lines[2]["id"], client.calls[0]["messages"][-1]["content"])
+
+    def test_batches_by_source_characters_and_keeps_oversized_message(self):
+        path = "script/a.json"
+        lines = [
+            line(path, 0, "a" * 210),
+            line(path, 1, "b" * 60),
+            line(path, 2, "c" * 70),
+            line(path, 3, "d" * 66),
+            line(path, 4, "e" * 5),
+        ]
+        client = RecordingClient([
+            response_for(lines[0]["id"], "Long."),
+            response_for_many(tuple(
+                (lines[index], "Batch %d." % index) for index in (1, 2, 3)
+            )),
+            response_for(lines[4]["id"], "Last."),
+        ])
+
+        TranslationEngine(client).translate(
+            [{"path": path, "lines": lines}],
+            {**SETTINGS, "batch_mode": "characters", "batch_limit": 200},
+        )
+
+        self.assertEqual(3, len(client.calls))
+        middle_prompt = client.calls[1]["messages"][-1]["content"]
+        for index in (1, 2, 3):
+            self.assertIn(lines[index]["id"], middle_prompt)
+        self.assertNotIn(lines[4]["id"], middle_prompt)
+
     def test_context_history_is_file_local_and_sequential(self):
         path_a = "script/a.json"
         path_b = "script/b.json"
@@ -129,9 +185,84 @@ class TranslationCycleTests(unittest.TestCase):
             "SOURCE SEGMENTS (chronological on-screen lines):\n  1. おは\n  2. よう",
             client.calls[0]["messages"][-1]["content"],
         )
-        self.assertIn("Good morning.", client.calls[1]["messages"][-1]["content"])
-        self.assertIn("<<<REFERENCE", client.calls[1]["messages"][-1]["content"])
+        self.assertNotIn("まだ眠い", client.calls[0]["messages"][-1]["content"])
+        self.assertIn("Good morning.", client.calls[1]["messages"][-2]["content"])
+        self.assertNotIn("おはよう", client.calls[1]["messages"][-1]["content"])
+        self.assertNotIn("<<<REFERENCE", client.calls[1]["messages"][-1]["content"])
+        self.assertEqual(2048, client.calls[0]["max_tokens"])
         self.assertIsNotNone(client.calls[0]["response_format"])
+
+    def test_first_turn_for_a_late_target_contains_all_past_lines_but_no_future(self):
+        path = "script/a.json"
+        lines = [
+            line(path, 0, "最初の行", "The first line."),
+            line(path, 1, "二番目の行"),
+            line(path, 2, "翻訳対象"),
+            line(path, 3, "未来の行"),
+        ]
+        client = RecordingClient([response_for(lines[2]["id"], "The target.")])
+
+        TranslationEngine(client).translate(
+            [{"path": path, "lines": lines}], SETTINGS, line_ids=[lines[2]["id"]]
+        )
+
+        prompt = client.calls[0]["messages"][-1]["content"]
+        self.assertLess(prompt.index("最初の行"), prompt.index("二番目の行"))
+        self.assertLess(prompt.index("二番目の行"), prompt.index("翻訳対象"))
+        self.assertIn("CURRENT TRANSLATION: The first line.", prompt)
+        self.assertNotIn("未来の行", prompt)
+
+    def test_old_reference_lines_are_trimmed_to_reserve_response_space(self):
+        path = "script/a.json"
+        oldest = "古" * 160
+        lines = [
+            line(path, 0, oldest),
+            line(path, 1, "近" * 80),
+            line(path, 2, "翻訳対象"),
+        ]
+        settings = {
+            **SETTINGS,
+            "context_window": 1400,
+            "response_reserve_percent": 25,
+        }
+        client = RecordingClient([response_for(lines[2]["id"], "The target.")])
+
+        TranslationEngine(client).translate(
+            [{"path": path, "lines": lines}], settings, line_ids=[lines[2]["id"]]
+        )
+
+        prompt = client.calls[0]["messages"][-1]["content"]
+        self.assertIn("older reference line", prompt)
+        self.assertNotIn(oldest, prompt)
+        self.assertIn("翻訳対象", prompt)
+        self.assertEqual(350, client.calls[0]["max_tokens"])
+
+    def test_old_completed_turns_are_dropped_as_pairs_when_history_fills(self):
+        path = "script/a.json"
+        lines = [
+            line(path, 0, "一" * 100),
+            line(path, 1, "二" * 100),
+        ]
+        settings = {
+            **SETTINGS,
+            "context_window": 1500,
+            "response_reserve_percent": 25,
+        }
+        client = RecordingClient([
+            response_for(lines[0]["id"], "First."),
+            response_for(lines[1]["id"], "Second."),
+        ])
+
+        TranslationEngine(client).translate(
+            [{"path": path, "lines": lines}], settings
+        )
+
+        self.assertEqual(
+            ["system", "user"],
+            [message["role"] for message in client.calls[1]["messages"]],
+        )
+        self.assertNotIn("一" * 100, client.calls[1]["messages"][-1]["content"])
+        self.assertIn("二" * 100, client.calls[1]["messages"][-1]["content"])
 
     def test_invalid_response_gets_one_contextual_repair(self):
         target = line("script/a.json", 0, "こんにちは")

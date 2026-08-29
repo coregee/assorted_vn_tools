@@ -43,10 +43,12 @@ and enter a folder path in the interface.
 4. Describe the game, characters, tone, terminology, and naming rules in
    **Game context**. Customize the system prompt if needed.
 5. Open a JSON file and choose **Translate untranslated**, select individual
-   lines and choose **Translate selected**, or use **Re-translate file**.
-6. Review the proposed translations individually or accept them together.
-   Suggestions remain unsaved edits until **Save changes** is pressed.
-7. Run the relevant toolset's `repack.py` after reviewing the JSON.
+   lines and choose **Translate selected**, or use **Re-translate file**. To
+   process several files in order, select them in the sidebar and choose
+   **Translate untranslated in selected files**.
+6. Model translations are written directly to each file's native target fields.
+   Use **Save changes** only for manual edits.
+7. Inspect the translated JSON and run the relevant toolset's `repack.py`.
 
 The editor also supports direct manual editing, source/translation search,
 speaker-name glossary files, protected non-translatable records, optimistic
@@ -54,22 +56,36 @@ save conflict detection, and keyboard shortcuts shown from the `?` button.
 
 ## Translation cycle
 
-The model is not given isolated lines. Each file is translated in sequential
-batches using:
+The model is not given isolated lines. Files are processed sequentially, with
+each completed file saved before the next begins. Within a file, translation
+runs in chronological conversation turns using:
 
 1. an editable system prompt, target language, and game-level context;
-2. surrounding lines before and after the requested targets, including existing
+2. every earlier line in the file, in native order, including existing
    translations where available;
-3. stable, delimited target IDs in native script order;
-4. a bounded history of prior user/assistant batch messages within the same
+3. one or more stable, delimited target IDs in native script order;
+4. the continuing user/assistant conversation from earlier lines in the same
    event file;
 5. translated speaker-glossary context and original on-screen row boundaries;
 6. a strict JSON response schema, exact ID/order validation, engine-token
    preservation, and one corrective retry for malformed output.
 
-History resets at file boundaries because the extracted formats do not encode a
-reliable cross-file story order. For a good result, keep related event lines in
-their native file and write specific game context before translating.
+Each request adds only the chronological lines not already present in the
+conversation. Set **Batch by** to **Messages** to cap the number of target
+messages per request, or **Source characters** to pack consecutive messages up
+to a combined source-character limit. A single message is always included even
+when it exceeds the character limit. Batches never cross file boundaries.
+
+History resets at file boundaries because the extracted formats do not encode
+a reliable cross-file story order. The configured **Response reserve** is kept
+free within the model's **Context window**; when the input no longer fits, the
+oldest complete conversation turns and then the oldest reference lines are
+removed. Token budgeting uses a conservative UTF-8 byte estimate so it remains
+model-independent.
+
+Set **Context window** to the context length configured for the loaded LM Studio
+model. For a good result, keep related event lines in their native file and
+write specific game context before translating.
 
 ## Supported JSON
 
@@ -80,9 +96,10 @@ their native file and write specific game context before translating.
 | Shining Star | `jp` | `tr` | `_names.json` and `_system.json` |
 
 The adapter changes only the native translation value. It does not add editor
-metadata to game JSON, reorder records, or silently save model responses.
+metadata to game JSON or reorder records. Successful model output is saved
+directly through the same native-field adapter used by manual edits.
 Protected Dasaku engine-variable fields are read-only. Sstar `\xHH` and Etutane
-`«HH»` engine tokens must be reproduced exactly or a suggestion is rejected.
+`«HH»` engine tokens must be reproduced exactly or the model batch is rejected.
 
 ## Local safety and persistence
 
@@ -94,7 +111,8 @@ Protected Dasaku engine-variable fields are read-only. Sstar `\xHH` and Etutane
 - Per-project prompt/context settings are stored as
   `.llm_translation_tools.settings` in the opened root. Its non-JSON extension
   prevents the native repackers from mistaking it for a script.
-- A model suggestion is only a proposal. Accept it, inspect it, then save it.
+- Multi-file jobs save one file at a time. If a later file fails, earlier
+  completed files remain translated and the failure is shown in the editor.
 
 Native wrapping, byte limits, and character encoding rules still apply. The
 game-specific repacker remains the final validator.

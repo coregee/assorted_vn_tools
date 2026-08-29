@@ -23,7 +23,7 @@ from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Optional,
 PROJECT_SETTINGS_FILE = ".llm_translation_tools.settings"
 PROJECT_SETTING_KEYS = frozenset(
     ("system_prompt", "game_context", "target_language", "model", "temperature",
-     "max_tokens", "batch_size", "context_before", "context_after")
+     "context_window", "response_reserve_percent", "batch_mode", "batch_limit")
 )
 
 

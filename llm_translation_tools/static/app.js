@@ -113,10 +113,6 @@
       return this.request(`${ENDPOINTS.jobs}/${encodeURIComponent(id)}`);
     },
 
-    getJobResult(id) {
-      return this.request(`${ENDPOINTS.jobs}/${encodeURIComponent(id)}/result`);
-    },
-
     async cancelJob(id) {
       try {
         return await this.request(`${ENDPOINTS.jobs}/${encodeURIComponent(id)}/cancel`, { method: "POST", body: {} });
@@ -138,10 +134,10 @@
     game_context: "",
     target_language: "English",
     temperature: 0.2,
-    max_tokens: 4096,
-    batch_size: 20,
-    context_before: 12,
-    context_after: 4,
+    batch_mode: "messages",
+    batch_limit: 8,
+    context_window: 32768,
+    response_reserve_percent: 20,
     allow_remote_lmstudio: false,
   });
 
@@ -150,9 +146,9 @@
     files: [],
     projectStats: {},
     activeFile: null,
+    selectedFiles: new Set(),
     selected: new Set(),
     dirty: new Map(),
-    suggestions: new Map(),
     settings: { ...DEFAULT_SETTINGS },
     job: null,
     jobPollTimer: null,
@@ -162,21 +158,20 @@
     lineFilter: "",
     loadSequence: 0,
     fileAbortController: null,
-    reviewReturnFocus: null,
   };
 
   const elementIds = [
     "connection-dot", "project-label", "error-banner", "error-title", "error-message", "dismiss-error",
     "open-project-form", "project-path", "open-project-button", "project-summary", "project-path-label",
     "stat-files", "stat-lines", "stat-translated", "project-progress", "completion-label", "file-browser",
-    "file-filter", "file-count", "file-list", "no-files", "welcome-state", "focus-path-button", "editor",
+    "file-filter", "file-count", "file-list", "no-files", "selected-file-count", "select-all-files",
+    "select-no-files", "translate-files", "welcome-state", "focus-path-button", "editor",
     "active-file-name", "active-file-path", "save-state", "save-button", "selection-count", "select-untranslated",
-    "select-all", "select-none", "translate-selected", "translate-untranslated", "translate-file", "review-suggestions",
+    "select-all", "select-none", "translate-selected", "translate-untranslated", "translate-file",
     "line-filter", "visible-line-count", "job-panel", "job-title", "job-message", "job-progressbar", "job-progress",
-    "cancel-job", "line-list", "empty-lines", "review-panel", "suggestion-summary", "close-review", "accept-all",
-    "reject-all", "suggestion-list", "review-empty", "app-status", "settings-button", "settings-dialog",
+    "cancel-job", "line-list", "empty-lines", "app-status", "settings-button", "settings-dialog",
     "settings-form", "setting-base-url", "setting-model", "models-list", "models-status", "setting-target-language",
-    "setting-batch-size", "setting-context-before", "setting-context-after", "setting-temperature", "setting-max-tokens",
+    "setting-batch-mode", "setting-batch-limit", "setting-context-window", "setting-response-reserve", "setting-temperature",
     "setting-allow-remote", "setting-game-context", "setting-system-prompt", "load-models", "settings-status",
     "save-settings", "shortcuts-button", "shortcuts-dialog",
   ];
@@ -360,10 +355,9 @@
     state.files = files;
     state.projectStats = extractProjectStats(payload);
     state.activeFile = null;
+    state.selectedFiles.clear();
     state.selected.clear();
     state.dirty.clear();
-    state.suggestions.clear();
-    closeReview();
     safeStorageSet("translation-workbench.project-path", state.projectPath);
     $("project-path").value = state.projectPath;
     renderProject();
@@ -457,9 +451,16 @@
     const fragment = document.createDocumentFragment();
 
     visibleFiles.forEach((file) => {
+      const row = createElement("div", "file-row");
+      const checkbox = createElement("input", "file-select");
+      checkbox.type = "checkbox";
+      checkbox.checked = state.selectedFiles.has(file.path);
+      checkbox.disabled = Boolean(state.job) || state.saving;
+      checkbox.dataset.path = file.path;
+      checkbox.setAttribute("aria-label", `Select ${file.name} for batch translation`);
       const button = createElement("button", "file-item");
       button.type = "button";
-      button.disabled = state.saving;
+      button.disabled = Boolean(state.job) || state.saving;
       button.dataset.path = file.path;
       button.title = file.path;
       const active = state.activeFile?.path === file.path;
@@ -476,26 +477,29 @@
       const progress = createElement("span", "file-percent", `${percent}%`);
       progress.title = `${counts.translated} of ${counts.translatable} translatable lines (${counts.total} total)`;
       button.append(icon, copy, progress);
-      fragment.append(button);
+      row.append(checkbox, button);
+      fragment.append(row);
     });
 
     $("file-list").replaceChildren(fragment);
     $("file-count").textContent = query ? `${visibleFiles.length} of ${state.files.length}` : String(state.files.length);
     $("no-files").hidden = visibleFiles.length > 0;
+    updateFileSelectionUi();
   }
 
-  function pendingSuggestions() {
-    return [...state.suggestions.values()].filter((suggestion) => suggestion.status === "pending");
+  function updateFileSelectionUi() {
+    const count = state.selectedFiles.size;
+    const busy = Boolean(state.job) || state.saving;
+    $("selected-file-count").textContent = String(count);
+    $("select-all-files").disabled = busy || state.files.length === count;
+    $("select-no-files").disabled = busy || count === 0;
+    $("translate-files").disabled = busy || count === 0;
   }
 
   function confirmCanLeave(action) {
     const dirtyCount = state.dirty.size;
-    const suggestionCount = pendingSuggestions().length;
-    if (!dirtyCount && !suggestionCount) return true;
-    const details = [];
-    if (dirtyCount) details.push(`${dirtyCount} unsaved edit${dirtyCount === 1 ? "" : "s"}`);
-    if (suggestionCount) details.push(`${suggestionCount} unreviewed suggestion${suggestionCount === 1 ? "" : "s"}`);
-    return window.confirm(`You have ${details.join(" and ")}. Discard them and ${action}?`);
+    if (!dirtyCount) return true;
+    return window.confirm(`You have ${dirtyCount} unsaved edit${dirtyCount === 1 ? "" : "s"}. Discard them and ${action}?`);
   }
 
   async function handleOpenProject(event) {
@@ -550,10 +554,8 @@
       state.activeFile = normalizeFile(payload, path);
       state.selected.clear();
       state.dirty.clear();
-      state.suggestions.clear();
       state.lineFilter = "";
       $("line-filter").value = "";
-      closeReview();
       renderActiveFile();
       setStatus(`Loaded ${state.activeFile.lines.length} lines from ${baseName(path)}`);
     } catch (error) {
@@ -827,10 +829,8 @@
         : !line?.hasTranslation && line?.translation === "";
       button.disabled = saving || !line?.translatable || Boolean(noOp);
     });
-    $("suggestion-list").querySelectorAll("button").forEach((button) => { button.disabled = saving; });
-    $("accept-all").disabled = saving || pendingSuggestions().length === 0;
-    $("reject-all").disabled = saving || pendingSuggestions().length === 0;
     updateSelectionUi();
+    renderFileList();
   }
 
   function collectSettings({ validate = true } = {}) {
@@ -846,10 +846,10 @@
       game_context: $("setting-game-context").value,
       target_language: $("setting-target-language").value.trim(),
       temperature: numeric("setting-temperature", DEFAULT_SETTINGS.temperature),
-      max_tokens: numeric("setting-max-tokens", DEFAULT_SETTINGS.max_tokens),
-      batch_size: numeric("setting-batch-size", DEFAULT_SETTINGS.batch_size),
-      context_before: numeric("setting-context-before", DEFAULT_SETTINGS.context_before),
-      context_after: numeric("setting-context-after", DEFAULT_SETTINGS.context_after),
+      batch_mode: $("setting-batch-mode").value,
+      batch_limit: numeric("setting-batch-limit", DEFAULT_SETTINGS.batch_limit),
+      context_window: numeric("setting-context-window", DEFAULT_SETTINGS.context_window),
+      response_reserve_percent: numeric("setting-response-reserve", DEFAULT_SETTINGS.response_reserve_percent),
       allow_remote_lmstudio: $("setting-allow-remote").checked,
     };
   }
@@ -866,10 +866,10 @@
     $("setting-game-context").value = settings.game_context ?? "";
     $("setting-target-language").value = settings.target_language ?? DEFAULT_SETTINGS.target_language;
     $("setting-temperature").value = settings.temperature ?? DEFAULT_SETTINGS.temperature;
-    $("setting-max-tokens").value = settings.max_tokens ?? DEFAULT_SETTINGS.max_tokens;
-    $("setting-batch-size").value = settings.batch_size ?? DEFAULT_SETTINGS.batch_size;
-    $("setting-context-before").value = settings.context_before ?? DEFAULT_SETTINGS.context_before;
-    $("setting-context-after").value = settings.context_after ?? DEFAULT_SETTINGS.context_after;
+    $("setting-batch-mode").value = settings.batch_mode ?? DEFAULT_SETTINGS.batch_mode;
+    $("setting-batch-limit").value = settings.batch_limit ?? DEFAULT_SETTINGS.batch_limit;
+    $("setting-context-window").value = settings.context_window ?? DEFAULT_SETTINGS.context_window;
+    $("setting-response-reserve").value = settings.response_reserve_percent ?? DEFAULT_SETTINGS.response_reserve_percent;
     $("setting-allow-remote").checked = Boolean(settings.allow_remote_lmstudio);
     $("settings-status").textContent = "";
   }
@@ -961,23 +961,24 @@
     }
   }
 
-  function jobPayload(lineIds) {
+  function jobPayload(filePaths, lineIds) {
     const settings = state.settings;
-    return {
-      files: [state.activeFile.path],
-      line_ids: lineIds,
+    const payload = {
+      files: filePaths,
       base_url: settings.base_url,
       model: settings.model,
       system_prompt: settings.system_prompt,
       game_context: settings.game_context,
       target_language: settings.target_language,
       temperature: settings.temperature,
-      max_tokens: settings.max_tokens,
-      batch_size: settings.batch_size,
-      context_before: settings.context_before,
-      context_after: settings.context_after,
+      batch_mode: settings.batch_mode,
+      batch_limit: settings.batch_limit,
+      context_window: settings.context_window,
+      response_reserve_percent: settings.response_reserve_percent,
       allow_remote_lmstudio: settings.allow_remote_lmstudio,
     };
+    if (lineIds !== undefined) payload.line_ids = lineIds;
+    return payload;
   }
 
   function normalizeJob(payload) {
@@ -1006,28 +1007,6 @@
     };
   }
 
-  function extractSuggestions(payload) {
-    const job = payload?.job ?? payload ?? {};
-    const result = payload?.result ?? job?.result;
-    let candidates =
-      payload?.suggestions ??
-      job?.suggestions ??
-      result?.suggestions ??
-      (Array.isArray(result) ? result : null) ??
-      payload?.results ??
-      job?.results ??
-      [];
-    if (candidates && !Array.isArray(candidates)) candidates = candidates.suggestions ?? candidates.results ?? [];
-    if (!Array.isArray(candidates)) return [];
-    return candidates
-      .map((suggestion) => ({
-        lineId: suggestion?.line_id ?? suggestion?.id ?? suggestion?.line?.id,
-        translation: suggestion?.suggestion ?? suggestion?.translation ?? suggestion?.proposed_translation ?? suggestion?.target ?? suggestion?.text,
-      }))
-      .filter((suggestion) => suggestion.lineId !== undefined && suggestion.translation !== undefined)
-      .map((suggestion) => ({ ...suggestion, key: String(suggestion.lineId), translation: String(suggestion.translation) }));
-  }
-
   function isFinishedStatus(status) {
     return ["completed", "complete", "done", "succeeded", "success", "failed", "error", "cancelled", "canceled"].includes(status);
   }
@@ -1043,7 +1022,15 @@
   function renderJob() {
     const job = state.job;
     $("job-panel").hidden = !job;
-    if (!job) return;
+    if (!job) {
+      $("file-list").querySelectorAll("button, input").forEach((control) => {
+        control.disabled = state.saving;
+      });
+      updateFileSelectionUi();
+      updateSelectionUi();
+      updateDirtyUi();
+      return;
+    }
     const hasProgress = job.percentage !== null;
     $("job-progressbar").classList.toggle("indeterminate", !hasProgress);
     const percentage = hasProgress ? Math.round(job.percentage) : 0;
@@ -1054,27 +1041,48 @@
       ? `${job.completed} of ${job.total} lines`
       : job.status === "queued" ? "Waiting for LM Studio…" : "Building context and translating…");
     $("cancel-job").disabled = isFinishedStatus(job.status) || job.status === "cancelling";
+    $("file-list").querySelectorAll("button, input").forEach((control) => { control.disabled = true; });
+    updateFileSelectionUi();
     updateSelectionUi();
     updateDirtyUi();
   }
 
   async function startTranslation(scope) {
-    if (!state.activeFile || state.job || state.saving) return;
+    if ((!state.activeFile && scope !== "files") || state.job || state.saving) return;
     clearError();
-    let lines;
-    if (scope === "selected") {
-      lines = state.activeFile.lines.filter((line) => state.selected.has(line.key));
-    } else if (scope === "untranslated") {
-      lines = state.activeFile.lines.filter((line) => line.translatable && !line.hasTranslation);
+    let filePaths;
+    let lineIds;
+    let lineCount;
+    if (scope === "files") {
+      const files = state.files.filter((file) => state.selectedFiles.has(file.path));
+      filePaths = files.map((file) => file.path);
+      lineCount = files.reduce((count, file) => {
+        const totals = currentFileCounts(file);
+        return count + Math.max(0, totals.translatable - totals.translated);
+      }, 0);
     } else {
-      lines = state.activeFile.lines.filter((line) => line.translatable);
+      let lines;
+      if (scope === "selected") {
+        lines = state.activeFile.lines.filter((line) => state.selected.has(line.key));
+      } else if (scope === "untranslated") {
+        lines = state.activeFile.lines.filter((line) => line.translatable && !line.hasTranslation);
+      } else {
+        lines = state.activeFile.lines.filter((line) => line.translatable);
+      }
+      filePaths = [state.activeFile.path];
+      lineIds = lines.map((line) => String(line.id));
+      lineCount = lines.length;
     }
 
-    if (!lines.length) {
-      showError(scope === "selected" ? "Select at least one translatable line first." : "There are no matching lines to translate.", "Nothing to translate");
+    if (!filePaths.length || !lineCount) {
+      const message = scope === "selected"
+        ? "Select at least one translatable line first."
+        : scope === "files"
+          ? "Select one or more files containing untranslated lines first."
+          : "There are no matching lines to translate.";
+      showError(message, "Nothing to translate");
       return;
     }
-    if (pendingSuggestions().length && !window.confirm("Discard the current unreviewed suggestions and start a new translation?")) return;
     if (state.dirty.size && !(await saveActiveFile())) return;
     if (!state.settings.model) {
       showError("Choose an LM Studio model in Settings before starting a translation.", "Model required");
@@ -1082,17 +1090,16 @@
       return;
     }
 
-    state.suggestions.clear();
-    closeReview();
-    setStatus(`Starting translation for ${lines.length} line${lines.length === 1 ? "" : "s"}…`);
-    [$("translate-selected"), $("translate-untranslated"), $("translate-file")].forEach((button) => button.disabled = true);
+    setStatus(`Starting translation for ${lineCount} line${lineCount === 1 ? "" : "s"}…`);
+    [$("translate-selected"), $("translate-untranslated"), $("translate-file"), $("translate-files")]
+      .forEach((button) => button.disabled = true);
     try {
-      const response = await api.createJob(jobPayload(lines.map((line) => String(line.id))));
+      const response = await api.createJob(jobPayload(filePaths, lineIds));
       state.job = normalizeJob(response);
       if (!state.job.id) throw new ApiError("The server started a job but did not return a job ID.");
       state.jobPollFailures = 0;
       renderJob();
-      setStatus(`Translation job started for ${lines.length} lines`);
+      setStatus(`Translation job started for ${lineCount} lines across ${filePaths.length} file${filePaths.length === 1 ? "" : "s"}`);
       if (isFinishedStatus(state.job.status)) {
         await finishJob(state.job);
       } else {
@@ -1105,6 +1112,7 @@
       setStatus("Translation did not start");
     } finally {
       updateSelectionUi();
+      updateFileSelectionUi();
     }
   }
 
@@ -1145,48 +1153,39 @@
 
   async function finishJob(job) {
     clearTimeout(state.jobPollTimer);
+    state.job = null;
+    renderJob();
     if (isCancelledStatus(job.status)) {
-      state.job = null;
-      renderJob();
+      await refreshTranslatedFiles();
       setStatus("Translation cancelled");
       return;
     }
     if (!isSuccessStatus(job.status)) {
-      state.job = null;
-      renderJob();
+      await refreshTranslatedFiles();
       showError(job.error || job.message || "The local model could not complete this translation.", "Translation failed");
       setStatus("Translation failed");
       return;
     }
+    await refreshTranslatedFiles();
+    const count = Number(job.completed || job.raw?.result_count || 0);
+    setStatus(`Translated and saved ${count} line${count === 1 ? "" : "s"}`);
+  }
 
-    let suggestions = extractSuggestions(job.raw);
-    if (!suggestions.length) {
-      try {
-        suggestions = extractSuggestions(await api.getJobResult(job.id));
-      } catch (error) {
-        // Some server versions include suggestions only in the final job object.
-        if (error.status !== 404) {
-          state.job = null;
-          renderJob();
-          showError(error, "Could not load translation results");
-          return;
-        }
+  async function refreshTranslatedFiles() {
+    const activePath = state.activeFile?.path;
+    try {
+      state.files = normalizeFiles(await api.getFiles());
+      if (activePath) {
+        state.activeFile = normalizeFile(await api.getFile(activePath), activePath);
+        state.selected.clear();
+        state.dirty.clear();
+        renderActiveFile();
+      } else {
+        renderProject();
       }
-    }
-
-    state.job = null;
-    renderJob();
-    state.suggestions.clear();
-    suggestions.forEach((suggestion) => {
-      if (findLine(suggestion.key)) state.suggestions.set(suggestion.key, { ...suggestion, status: "pending" });
-    });
-    renderSuggestions();
-    if (pendingSuggestions().length) {
-      openReview();
-      setStatus(`${pendingSuggestions().length} proposed translation${pendingSuggestions().length === 1 ? "" : "s"} ready to review`);
-    } else {
-      showError("The job completed without returning suggestions for this file.", "No suggestions returned");
-      setStatus("Translation completed with no suggestions");
+      renderProjectStats();
+    } catch (error) {
+      showError(error, "Translation finished, but the updated files could not be reloaded");
     }
   }
 
@@ -1212,134 +1211,6 @@
       scheduleJobPoll();
       showError(error, "Could not cancel translation");
     }
-  }
-
-  function renderSuggestions() {
-    const suggestions = pendingSuggestions();
-    const fragment = document.createDocumentFragment();
-    suggestions.forEach((suggestion) => {
-      const line = findLine(suggestion.key);
-      if (!line) return;
-      const card = createElement("article", "suggestion-card");
-      card.dataset.lineKey = suggestion.key;
-      const meta = createElement("div", "suggestion-meta");
-      meta.append(createElement("span", "line-number", `#${line.index}`));
-      if (line.speaker) meta.append(createElement("span", "speaker-badge", line.speaker));
-      card.append(meta);
-      card.append(createElement("p", "suggestion-source", line.sourceDisplay));
-
-      const diff = createElement("div", "diff-block");
-      const current = createElement("div", "diff-row diff-current");
-      current.append(createElement("strong", "", "Current"));
-      const currentText = line.translation || (line.hasTranslation ? "(intentional blank)" : "(untranslated)");
-      current.append(createElement("p", "", currentText));
-      const proposed = createElement("div", "diff-row diff-proposed");
-      proposed.append(createElement("strong", "", "Proposed"));
-      proposed.append(createElement("p", "", suggestion.translation));
-      diff.append(current, proposed);
-      card.append(diff);
-
-      const actions = createElement("div", "suggestion-actions");
-      const reject = createElement("button", "button button-quiet", "Reject");
-      reject.type = "button";
-      reject.dataset.action = "reject";
-      reject.setAttribute("aria-label", `Reject proposed translation for line ${line.index}`);
-      const accept = createElement("button", "button button-primary", "Accept");
-      accept.type = "button";
-      accept.dataset.action = "accept";
-      accept.setAttribute("aria-label", `Accept proposed translation for line ${line.index}`);
-      actions.append(reject, accept);
-      card.append(actions);
-      fragment.append(card);
-    });
-
-    $("suggestion-list").replaceChildren(fragment);
-    $("suggestion-summary").textContent = `${suggestions.length} suggestion${suggestions.length === 1 ? "" : "s"} to review`;
-    $("review-empty").hidden = suggestions.length > 0;
-    $("accept-all").disabled = suggestions.length === 0 || state.saving;
-    $("reject-all").disabled = suggestions.length === 0 || state.saving;
-    $("review-suggestions").hidden = suggestions.length === 0 || !$("review-panel").hidden;
-  }
-
-  function decideSuggestion(key, decision) {
-    if (state.saving) return;
-    const suggestion = state.suggestions.get(String(key));
-    if (!suggestion || suggestion.status !== "pending") return;
-    if (decision === "accept") {
-      const line = findLine(suggestion.key);
-      if (line) {
-        const textarea = $("line-list").querySelector(`textarea[data-line-key="${CSS.escape(line.key)}"]`);
-        if (textarea) textarea.value = suggestion.translation;
-        updateLineTranslation(line.key, suggestion.translation, textarea);
-      }
-      suggestion.status = "accepted";
-    } else {
-      suggestion.status = "rejected";
-    }
-    renderSuggestions();
-  }
-
-  function decideAllSuggestions(decision) {
-    if (state.saving) return;
-    pendingSuggestions().forEach((suggestion) => {
-      if (decision === "accept") {
-        const line = findLine(suggestion.key);
-        if (line) {
-          line.translation = suggestion.translation;
-          line.hasTranslation = true;
-          if (line.translation === line.originalTranslation && line.originalActive) {
-            state.dirty.delete(line.key);
-            line.hasTranslation = line.originalActive;
-          } else {
-            state.dirty.set(line.key, { id: line.id, translation: line.translation });
-          }
-        }
-        suggestion.status = "accepted";
-      } else {
-        suggestion.status = "rejected";
-      }
-    });
-    if (decision === "accept") renderLineList();
-    renderSuggestions();
-    updateDirtyUi();
-    renderProjectStats();
-    renderFileList();
-    if (decision === "accept") setStatus("All proposed translations accepted as unsaved edits");
-    else setStatus("All proposed translations rejected");
-  }
-
-  function setReviewBackgroundInert(inert) {
-    const background = [document.querySelector(".topbar"), document.querySelector(".sidebar"), document.querySelector(".editor-shell"), document.querySelector(".statusbar")];
-    background.forEach((element) => { if (element) element.inert = inert; });
-  }
-
-  function openReview() {
-    if (!pendingSuggestions().length) return;
-    state.reviewReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    $("review-panel").hidden = false;
-    document.querySelector(".app-layout").classList.add("review-open");
-    $("review-suggestions").hidden = true;
-    const overlay = window.matchMedia("(max-width: 1180px)").matches;
-    $("review-panel").setAttribute("role", overlay ? "dialog" : "complementary");
-    if (overlay) {
-      $("review-panel").setAttribute("aria-modal", "true");
-      setReviewBackgroundInert(true);
-    } else {
-      $("review-panel").removeAttribute("aria-modal");
-    }
-    requestAnimationFrame(() => $("accept-all").focus());
-  }
-
-  function closeReview({ restoreFocus = true } = {}) {
-    const wasOpen = !$("review-panel").hidden;
-    $("review-panel").hidden = true;
-    document.querySelector(".app-layout").classList.remove("review-open");
-    $("review-suggestions").hidden = pendingSuggestions().length === 0;
-    $("review-panel").removeAttribute("aria-modal");
-    $("review-panel").setAttribute("role", "complementary");
-    setReviewBackgroundInert(false);
-    if (wasOpen && restoreFocus && state.reviewReturnFocus?.isConnected) state.reviewReturnFocus.focus();
-    state.reviewReturnFocus = null;
   }
 
   function openSettings() {
@@ -1405,6 +1276,21 @@
       const item = event.target.closest(".file-item");
       if (item) loadFile(item.dataset.path);
     });
+    $("file-list").addEventListener("change", (event) => {
+      if (!event.target.matches(".file-select")) return;
+      if (event.target.checked) state.selectedFiles.add(event.target.dataset.path);
+      else state.selectedFiles.delete(event.target.dataset.path);
+      updateFileSelectionUi();
+    });
+    $("select-all-files").addEventListener("click", () => {
+      state.files.forEach((file) => state.selectedFiles.add(file.path));
+      renderFileList();
+    });
+    $("select-no-files").addEventListener("click", () => {
+      state.selectedFiles.clear();
+      renderFileList();
+    });
+    $("translate-files").addEventListener("click", () => startTranslation("files"));
     $("line-filter").addEventListener("input", (event) => {
       state.lineFilter = event.target.value;
       renderLineList();
@@ -1446,16 +1332,6 @@
     $("translate-file").addEventListener("click", () => startTranslation("file"));
     $("cancel-job").addEventListener("click", cancelActiveJob);
 
-    $("suggestion-list").addEventListener("click", (event) => {
-      const action = event.target.closest("[data-action]");
-      const card = event.target.closest(".suggestion-card");
-      if (action && card) decideSuggestion(card.dataset.lineKey, action.dataset.action);
-    });
-    $("accept-all").addEventListener("click", () => decideAllSuggestions("accept"));
-    $("reject-all").addEventListener("click", () => decideAllSuggestions("reject"));
-    $("close-review").addEventListener("click", closeReview);
-    $("review-suggestions").addEventListener("click", openReview);
-
     document.addEventListener("keydown", (event) => {
       const modifier = event.ctrlKey || event.metaKey;
       if (modifier && event.key.toLocaleLowerCase() === "s") {
@@ -1471,8 +1347,6 @@
       } else if (event.altKey && event.key.toLocaleLowerCase() === "a") {
         event.preventDefault();
         if (state.activeFile && !state.job) setSelection(() => true);
-      } else if (event.key === "Escape" && !$("review-panel").hidden) {
-        closeReview();
       }
     });
 

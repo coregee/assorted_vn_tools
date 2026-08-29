@@ -20,7 +20,8 @@ from .lmstudio import DEFAULT_BASE_URL, LMStudioClient, LMStudioError, validate_
 from .project import (PROJECT_SETTING_KEYS, FileConflict, InvalidScript, Project,
                       ProjectError, ProjectStore)
 from .translator import (DEFAULT_SYSTEM_PROMPT, TranslationCancelled,
-                         TranslationEngine, TranslationError, select_lines)
+                         TranslationEngine, TranslationError, make_batches,
+                         select_lines)
 
 
 DEFAULT_HOST = "127.0.0.1"
@@ -34,10 +35,10 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "game_context": "",
     "target_language": "English",
     "temperature": 0.2,
-    "max_tokens": 4096,
-    "batch_size": 8,
-    "context_before": 12,
-    "context_after": 6,
+    "batch_mode": "messages",
+    "batch_limit": 8,
+    "context_window": 32768,
+    "response_reserve_percent": 20,
     "allow_remote_lmstudio": False,
 }
 
@@ -92,9 +93,12 @@ class SettingsStore:
         if not 0 <= float(temperature) <= 2:
             raise APIError(400, "temperature must be between 0 and 2")
         result["temperature"] = float(temperature)
+        if result.get("batch_mode") not in ("messages", "characters"):
+            raise APIError(400, "batch_mode must be 'messages' or 'characters'")
         for key, minimum, maximum in (
-                ("max_tokens", 1, 131072), ("batch_size", 1, 100),
-                ("context_before", 0, 200), ("context_after", 0, 200)):
+                ("batch_limit", 1, 1000000),
+                ("context_window", 1024, 1048576),
+                ("response_reserve_percent", 5, 50)):
             value = result.get(key)
             if isinstance(value, bool) or not isinstance(value, int):
                 raise APIError(400, "%s must be an integer" % key)
@@ -151,6 +155,7 @@ class TranslationJob:
     batch: int = 0
     batches: int = 0
     suggestions: List[Dict[str, Any]] = field(default_factory=list)
+    written_files: List[str] = field(default_factory=list)
     error: Optional[str] = None
     created_at: str = field(default_factory=_utc_now)
     started_at: Optional[str] = None
@@ -174,6 +179,7 @@ class TranslationJob:
                     "batches": self.batches,
                 },
                 "result_count": len(self.suggestions),
+                "written_files": list(self.written_files),
                 "error": self.error,
                 "cancellation_requested": self.cancel_event.is_set(),
                 "created_at": self.created_at,
@@ -205,12 +211,14 @@ class JobManager:
                 self._jobs.pop(old.id, None)
             self._jobs[job.id] = job
         thread = threading.Thread(
-            target=self._run, args=(job, files, dict(settings), file_paths, line_ids),
+            target=self._run,
+            args=(job, project, files, dict(settings), file_paths, line_ids),
             name="translation-%s" % job.id[:8], daemon=True)
         thread.start()
         return job
 
-    def _run(self, job: TranslationJob, files: Sequence[Mapping[str, Any]],
+    def _run(self, job: TranslationJob, project: Project,
+             files: Sequence[Mapping[str, Any]],
              settings: Mapping[str, Any], file_paths: Optional[Sequence[str]],
              line_ids: Optional[Sequence[str]]) -> None:
         with job.lock:
@@ -221,24 +229,61 @@ class JobManager:
             job.status = "running"
             job.started_at = _utc_now()
 
-        def progress(completed: int, total: int, batch: int, batches: int) -> None:
-            with job.lock:
-                job.completed = completed
-                job.total = total
-                job.batch = batch
-                job.batches = batches
-
         try:
             client = LMStudioClient(
                 settings["base_url"], settings["allow_remote_lmstudio"])
-            suggestions = TranslationEngine(client).translate(
-                files, settings, file_paths, line_ids, job.cancel_event.is_set, progress)
+            selected = select_lines(files, file_paths, line_ids)
+            targets_by_file: Dict[str, List[str]] = {}
+            for file_data, line in selected:
+                targets_by_file.setdefault(file_data["path"], []).append(line["id"])
+            total_batches = len(make_batches(
+                files, selected, settings["batch_mode"], settings["batch_limit"]))
+            completed_lines = 0
+            completed_batches = 0
+            engine = TranslationEngine(client)
+
+            for file_data in files:
+                path = file_data["path"]
+                target_ids = targets_by_file.get(path)
+                if not target_ids:
+                    continue
+                if job.cancel_event.is_set():
+                    raise TranslationCancelled()
+                batches_in_file = 0
+
+                def progress(completed: int, _total: int, batch: int,
+                             _batches: int) -> None:
+                    nonlocal batches_in_file
+                    batches_in_file = batch
+                    with job.lock:
+                        job.completed = completed_lines + completed
+                        job.total = len(selected)
+                        job.batch = completed_batches + batch
+                        job.batches = total_batches
+
+                suggestions = engine.translate(
+                    files, settings, [path], target_ids,
+                    job.cancel_event.is_set, progress)
+                if job.cancel_event.is_set():
+                    raise TranslationCancelled()
+                updates = [{
+                    "id": suggestion["id"],
+                    "translation": suggestion["suggestion"],
+                } for suggestion in suggestions]
+                updated = project.update_file(path, file_data["token"], updates)
+                file_data["token"] = updated["token"]
+                file_data["lines"] = updated["lines"]
+                completed_lines += len(suggestions)
+                completed_batches += batches_in_file
+                with job.lock:
+                    job.written_files.append(path)
+                    job.suggestions.extend(suggestions)
+                    job.completed = completed_lines
             with job.lock:
                 if job.cancel_event.is_set():
                     job.status = "cancelled"
                 else:
-                    job.suggestions = suggestions
-                    job.completed = len(suggestions)
+                    job.completed = completed_lines
                     job.status = "completed"
                 job.finished_at = _utc_now()
         except TranslationCancelled:
