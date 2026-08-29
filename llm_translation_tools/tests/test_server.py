@@ -33,6 +33,31 @@ class FakeLMStudioClient:
         })
 
 
+class BlockingSecondTurnClient(FakeLMStudioClient):
+    calls = 0
+    lock = threading.Lock()
+    second_started = threading.Event()
+    release_second = threading.Event()
+
+    @classmethod
+    def reset(cls):
+        with cls.lock:
+            cls.calls = 0
+        cls.second_started.clear()
+        cls.release_second.clear()
+
+    def chat_completion(self, messages, model, temperature, max_tokens,
+                        response_format=None):
+        with self.lock:
+            type(self).calls += 1
+            call_number = type(self).calls
+        if call_number == 2:
+            self.second_started.set()
+            self.release_second.wait(timeout=5)
+        return super().chat_completion(
+            messages, model, temperature, max_tokens, response_format)
+
+
 class ServerIntegrationTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="vn web api ")
@@ -236,6 +261,62 @@ class ServerIntegrationTests(unittest.TestCase):
             "POST",
             {},
         )[0])
+
+    @mock.patch("llm_translation_tools.server.LMStudioClient", BlockingSecondTurnClient)
+    def test_job_saves_each_turn_and_preserves_it_when_cancelled(self):
+        (self.script / "scene.json").write_text(
+            json.dumps([
+                {"message": "一", "translated": None},
+                {"message": "二", "translated": None},
+                {"message": "三", "translated": None},
+            ], ensure_ascii=False, indent=1),
+            encoding="utf-8",
+        )
+        BlockingSecondTurnClient.reset()
+        opened = self.open_project()
+        path = opened["files"][0]["path"]
+        self.request(
+            "/api/settings",
+            "PUT",
+            {"model": "fixture-model", "batch_mode": "messages", "batch_limit": 1},
+        )
+        job_id = self.request(
+            "/api/jobs", "POST", {"files": [path]},
+        )[1]["id"]
+
+        try:
+            self.assertTrue(
+                BlockingSecondTurnClient.second_started.wait(timeout=5),
+                "second request turn did not start",
+            )
+            partial = self.request(
+                "/api/file?" + urllib.parse.urlencode({"path": path})
+            )[1]
+            self.assertEqual("Translated line 1", partial["lines"][0]["translation"])
+            self.assertIsNone(partial["lines"][1]["translation"])
+            self.assertIsNone(partial["lines"][2]["translation"])
+
+            self.request("/api/jobs/%s/cancel" % job_id, "POST", {})
+        finally:
+            BlockingSecondTurnClient.release_second.set()
+
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            job = self.request("/api/jobs/" + job_id)[1]
+            if job["status"] in ("completed", "failed", "cancelled"):
+                break
+            time.sleep(0.02)
+        else:
+            self.fail("cancelled translation job did not finish")
+
+        self.assertEqual("cancelled", job["status"], job.get("error"))
+        self.assertEqual(2, job["progress"]["completed"])
+        saved = self.request(
+            "/api/file?" + urllib.parse.urlencode({"path": path})
+        )[1]
+        self.assertEqual("Translated line 1", saved["lines"][0]["translation"])
+        self.assertEqual("Translated line 1", saved["lines"][1]["translation"])
+        self.assertIsNone(saved["lines"][2]["translation"])
 
 
 if __name__ == "__main__":

@@ -56,9 +56,11 @@ save conflict detection, and keyboard shortcuts shown from the `?` button.
 
 ## Translation cycle
 
-The model is not given isolated lines. Files are processed sequentially, with
-each completed file saved before the next begins. Within a file, translation
-runs in chronological conversation turns using:
+The model is not given isolated lines. Files are processed sequentially, and
+every successful request turn is written to the native target fields before
+the next request begins. The editor reloads those committed translations as
+job progress advances. Within a file, translation runs in chronological
+conversation turns using:
 
 1. an editable system prompt, target language, and game-level context;
 2. every earlier line in the file, in native order, including existing
@@ -111,8 +113,9 @@ Protected Dasaku engine-variable fields are read-only. Sstar `\xHH` and Etutane
 - Per-project prompt/context settings are stored as
   `.llm_translation_tools.settings` in the opened root. Its non-JSON extension
   prevents the native repackers from mistaking it for a script.
-- Multi-file jobs save one file at a time. If a later file fails, earlier
-  completed files remain translated and the failure is shown in the editor.
+- Jobs save after every successful request turn. Cancelling or failing a later
+  request preserves all earlier committed translations, including partial
+  progress within the current file.
 
 Native wrapping, byte limits, and character encoding rules still apply. The
 game-specific repacker remains the final validator.

@@ -105,9 +105,12 @@ class TranslationCycleTests(unittest.TestCase):
             response_for(lines[2]["id"], "Three."),
         ])
 
+        committed = []
         result = TranslationEngine(client).translate(
             [{"path": path, "lines": lines}],
             {**SETTINGS, "batch_limit": 2},
+            turn_completed=lambda file_path, rows: committed.append(
+                (file_path, [row["id"] for row in rows])),
         )
 
         self.assertEqual(3, len(result))
@@ -115,6 +118,10 @@ class TranslationCycleTests(unittest.TestCase):
         self.assertIn(lines[0]["id"], client.calls[0]["messages"][-1]["content"])
         self.assertIn(lines[1]["id"], client.calls[0]["messages"][-1]["content"])
         self.assertNotIn(lines[2]["id"], client.calls[0]["messages"][-1]["content"])
+        self.assertEqual([
+            (path, [lines[0]["id"], lines[1]["id"]]),
+            (path, [lines[2]["id"]]),
+        ], committed)
 
     def test_batches_by_source_characters_and_keeps_oversized_message(self):
         path = "script/a.json"

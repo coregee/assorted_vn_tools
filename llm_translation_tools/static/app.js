@@ -616,7 +616,7 @@
       checkbox.type = "checkbox";
       checkbox.dataset.lineKey = line.key;
       checkbox.checked = state.selected.has(line.key);
-      checkbox.disabled = !line.translatable || state.saving;
+      checkbox.disabled = !line.translatable || Boolean(state.job) || state.saving;
       selectWrap.append(checkbox);
 
       const content = createElement("div", "line-content");
@@ -644,7 +644,8 @@
       clearButton.dataset.lineAction = "clear";
       clearButton.setAttribute("aria-label", `Clear translation for line ${line.index}`);
       clearButton.title = "Mark this line untranslated (save null)";
-      clearButton.disabled = !line.translatable || (!line.hasTranslation && line.translation === "");
+      clearButton.disabled = !line.translatable || Boolean(state.job) ||
+        (!line.hasTranslation && line.translation === "");
       lineActions.append(clearButton);
       if (line.emptyIsApplied) {
         const blankButton = createElement("button", "line-action", "Set blank");
@@ -652,7 +653,8 @@
         blankButton.dataset.lineAction = "blank";
         blankButton.setAttribute("aria-label", `Set intentional blank output for line ${line.index}`);
         blankButton.title = "Save an intentional empty output for this engine";
-        blankButton.disabled = !line.translatable || (line.hasTranslation && line.translation === "");
+        blankButton.disabled = !line.translatable || Boolean(state.job) ||
+          (line.hasTranslation && line.translation === "");
         lineActions.append(blankButton);
       }
       labelRow.append(translationLabel, lineActions);
@@ -662,7 +664,7 @@
       textarea.dataset.lineKey = line.key;
       textarea.value = line.translation;
       textarea.placeholder = line.translatable ? "Enter translation…" : "This line is not translatable";
-      textarea.disabled = !line.translatable || state.saving;
+      textarea.disabled = !line.translatable || Boolean(state.job) || state.saving;
       textarea.rows = 2;
       textarea.setAttribute("aria-label", `Translation for line ${line.index}`);
       translationSection.append(textarea);
@@ -1124,6 +1126,7 @@
   async function pollJob() {
     if (!state.job?.id) return;
     const expectedId = state.job.id;
+    const previousCompleted = state.job.completed;
     try {
       const payload = await api.getJob(expectedId);
       if (state.job?.id !== expectedId) return;
@@ -1134,6 +1137,9 @@
       if (isFinishedStatus(state.job.status)) {
         await finishJob(state.job);
       } else {
+        if (state.job.completed > previousCompleted) {
+          await refreshTranslatedFiles({ preserveSelection: true });
+        }
         scheduleJobPoll();
       }
     } catch (error) {
@@ -1171,13 +1177,16 @@
     setStatus(`Translated and saved ${count} line${count === 1 ? "" : "s"}`);
   }
 
-  async function refreshTranslatedFiles() {
+  async function refreshTranslatedFiles({ preserveSelection = false } = {}) {
     const activePath = state.activeFile?.path;
+    const selected = preserveSelection ? new Set(state.selected) : new Set();
     try {
       state.files = normalizeFiles(await api.getFiles());
       if (activePath) {
         state.activeFile = normalizeFile(await api.getFile(activePath), activePath);
-        state.selected.clear();
+        state.selected = new Set(
+          [...selected].filter((key) => state.activeFile.lines.some((line) => line.key === key))
+        );
         state.dirty.clear();
         renderActiveFile();
       } else {

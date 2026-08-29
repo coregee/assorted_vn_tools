@@ -20,8 +20,7 @@ from .lmstudio import DEFAULT_BASE_URL, LMStudioClient, LMStudioError, validate_
 from .project import (PROJECT_SETTING_KEYS, FileConflict, InvalidScript, Project,
                       ProjectError, ProjectStore)
 from .translator import (DEFAULT_SYSTEM_PROMPT, TranslationCancelled,
-                         TranslationEngine, TranslationError, make_batches,
-                         select_lines)
+                         TranslationEngine, TranslationError, select_lines)
 
 
 DEFAULT_HOST = "127.0.0.1"
@@ -232,40 +231,11 @@ class JobManager:
         try:
             client = LMStudioClient(
                 settings["base_url"], settings["allow_remote_lmstudio"])
-            selected = select_lines(files, file_paths, line_ids)
-            targets_by_file: Dict[str, List[str]] = {}
-            for file_data, line in selected:
-                targets_by_file.setdefault(file_data["path"], []).append(line["id"])
-            total_batches = len(make_batches(
-                files, selected, settings["batch_mode"], settings["batch_limit"]))
-            completed_lines = 0
-            completed_batches = 0
-            engine = TranslationEngine(client)
+            file_by_path = {file_data["path"]: file_data for file_data in files}
 
-            for file_data in files:
-                path = file_data["path"]
-                target_ids = targets_by_file.get(path)
-                if not target_ids:
-                    continue
-                if job.cancel_event.is_set():
-                    raise TranslationCancelled()
-                batches_in_file = 0
-
-                def progress(completed: int, _total: int, batch: int,
-                             _batches: int) -> None:
-                    nonlocal batches_in_file
-                    batches_in_file = batch
-                    with job.lock:
-                        job.completed = completed_lines + completed
-                        job.total = len(selected)
-                        job.batch = completed_batches + batch
-                        job.batches = total_batches
-
-                suggestions = engine.translate(
-                    files, settings, [path], target_ids,
-                    job.cancel_event.is_set, progress)
-                if job.cancel_event.is_set():
-                    raise TranslationCancelled()
+            def persist_turn(path: str,
+                             suggestions: Sequence[Mapping[str, Any]]) -> None:
+                file_data = file_by_path[path]
                 updates = [{
                     "id": suggestion["id"],
                     "translation": suggestion["suggestion"],
@@ -273,17 +243,27 @@ class JobManager:
                 updated = project.update_file(path, file_data["token"], updates)
                 file_data["token"] = updated["token"]
                 file_data["lines"] = updated["lines"]
-                completed_lines += len(suggestions)
-                completed_batches += batches_in_file
                 with job.lock:
-                    job.written_files.append(path)
+                    if path not in job.written_files:
+                        job.written_files.append(path)
                     job.suggestions.extend(suggestions)
-                    job.completed = completed_lines
+
+            def progress(completed: int, total: int, batch: int,
+                         batches: int) -> None:
+                with job.lock:
+                    job.completed = completed
+                    job.total = total
+                    job.batch = batch
+                    job.batches = batches
+
+            suggestions = TranslationEngine(client).translate(
+                files, settings, file_paths, line_ids,
+                job.cancel_event.is_set, progress, persist_turn)
             with job.lock:
                 if job.cancel_event.is_set():
                     job.status = "cancelled"
                 else:
-                    job.completed = completed_lines
+                    job.completed = len(suggestions)
                     job.status = "completed"
                 job.finished_at = _utc_now()
         except TranslationCancelled:

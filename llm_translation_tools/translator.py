@@ -355,7 +355,10 @@ class TranslationEngine:
                   file_paths: Optional[Sequence[str]] = None,
                   line_ids: Optional[Sequence[str]] = None,
                   cancelled: Optional[Callable[[], bool]] = None,
-                  progress: Optional[Callable[[int, int, int, int], None]] = None
+                  progress: Optional[Callable[[int, int, int, int], None]] = None,
+                  turn_completed: Optional[
+                      Callable[[str, Sequence[Mapping[str, Any]]], None]
+                  ] = None,
                   ) -> List[Dict[str, Any]]:
         selected = select_lines(files, file_paths, line_ids)
         if not selected:
@@ -430,13 +433,14 @@ class TranslationEngine:
                 ]
 
             targets_by_id = {line["id"]: line for line in batch.targets}
+            turn_suggestions: List[Dict[str, Any]] = []
             for row in parsed:
                 line = targets_by_id[row["id"]]
                 suggested[row["id"]] = row["translation"]
                 if line.get("kind") == "name":
                     for alias in _glossary_aliases(line["source"]):
                         glossary[alias] = row["translation"]
-                suggestions.append({
+                turn_suggestions.append({
                     "id": row["id"],
                     "file": batch.file_path,
                     "source": line["source"],
@@ -445,6 +449,9 @@ class TranslationEngine:
                     "speaker": line.get("speaker"),
                     "kind": line.get("kind"),
                 })
+            if turn_completed:
+                turn_completed(batch.file_path, turn_suggestions)
+            suggestions.extend(turn_suggestions)
             done += len(parsed)
             context_start = batch.targets[-1]["index"] + 1
             if progress:
