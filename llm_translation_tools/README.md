@@ -107,6 +107,12 @@ Set **Context window** to the context length configured for the loaded LM Studio
 model. For a good result, keep related event lines in their native file and
 write specific game context before translating.
 
+Use **Save as default** in the settings dialog to apply the current form to the
+open project and use it as the starting configuration for future projects. User
+defaults are stored outside game folders in the operating system's user-config
+directory; an existing project's `.llm_translation_tools.settings` values still
+override them.
+
 ## Supported JSON
 
 | Toolset | Source field | Translation field | Other supported files |

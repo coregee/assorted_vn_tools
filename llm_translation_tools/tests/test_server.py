@@ -10,7 +10,7 @@ import urllib.request
 from pathlib import Path
 from unittest import mock
 
-from llm_translation_tools.server import AppState, create_server
+from llm_translation_tools.server import AppState, SettingsStore, create_server
 
 
 class FakeLMStudioClient:
@@ -71,7 +71,9 @@ class ServerIntegrationTests(unittest.TestCase):
             ], ensure_ascii=False, indent=1),
             encoding="utf-8",
         )
-        self.state = AppState(base_dir=Path(self.temporary.name))
+        self.defaults_path = Path(self.temporary.name) / "user config" / "defaults.json"
+        self.state = AppState(
+            base_dir=Path(self.temporary.name), defaults_path=self.defaults_path)
         self.server = create_server(port=0, state=self.state)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
@@ -342,6 +344,63 @@ class ServerIntegrationTests(unittest.TestCase):
         )
         self.assertEqual(400, status)
         self.assertIn("messages", payload["error"]["message"])
+
+    def test_default_settings_persist_and_seed_future_projects(self):
+        self.open_project()
+        _status, saved, _headers = self.request(
+            "/api/settings/defaults", "PUT",
+            {
+                "model": "default-model",
+                "target_language": "French",
+                "game_context": "Default terminology.",
+                "context_window": 65536,
+            },
+        )
+        self.assertEqual(str(self.defaults_path), saved["path"])
+        self.assertEqual("default-model", saved["settings"]["model"])
+        self.assertEqual("French", saved["settings"]["target_language"])
+        self.assertTrue(self.defaults_path.is_file())
+
+        reloaded = SettingsStore(self.defaults_path).get()
+        self.assertEqual("default-model", reloaded["model"])
+        self.assertEqual("Default terminology.", reloaded["game_context"])
+        self.assertEqual(65536, reloaded["context_window"])
+
+        future_root = Path(self.temporary.name) / "future game"
+        future_script = future_root / "script"
+        future_script.mkdir(parents=True)
+        (future_script / "scene.json").write_text(
+            json.dumps([{"message": "未来", "translated": None}], ensure_ascii=False),
+            encoding="utf-8",
+        )
+        future = self.request(
+            "/api/project/open", "POST", {"path": str(future_root)})[1]
+        self.assertEqual("default-model", future["settings"]["model"])
+        self.assertEqual("French", future["settings"]["target_language"])
+        self.assertEqual("Default terminology.", future["settings"]["game_context"])
+
+        override_root = Path(self.temporary.name) / "existing project"
+        override_script = override_root / "script"
+        override_script.mkdir(parents=True)
+        (override_script / "scene.json").write_text(
+            json.dumps([{"message": "既存", "translated": None}], ensure_ascii=False),
+            encoding="utf-8",
+        )
+        (override_root / ".llm_translation_tools.settings").write_text(
+            json.dumps({"target_language": "German"}), encoding="utf-8")
+        existing = self.request(
+            "/api/project/open", "POST", {"path": str(override_root)})[1]
+        self.assertEqual("German", existing["settings"]["target_language"])
+        self.assertEqual("default-model", existing["settings"]["model"])
+
+        project_settings = json.loads(
+            (self.root / ".llm_translation_tools.settings").read_text(encoding="utf-8"))
+        self.assertEqual("French", project_settings["target_language"])
+
+        status, payload = self.error(
+            "/api/settings/defaults", "PUT", {"unknown": True})
+        self.assertEqual(400, status)
+        self.assertIn("unknown settings", payload["error"]["message"])
 
     @mock.patch("llm_translation_tools.server.LMStudioClient", FakeLMStudioClient)
     def test_job_writes_multiple_files_in_sequence(self):

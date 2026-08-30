@@ -5,8 +5,10 @@ from __future__ import annotations
 import ipaddress
 import json
 import mimetypes
+import os
 import subprocess
 import sys
+import tempfile
 import threading
 import uuid
 import webbrowser
@@ -35,6 +37,16 @@ TOOLSETS: Dict[str, Dict[str, str]] = {
     "etutane": {"label": "Etsuraku no Tane", "directory": "etutane_tools"},
     "sstar": {"label": "Shining Star", "directory": "sstar_tools"},
 }
+
+
+def _default_settings_path() -> Path:
+    if os.name == "nt" and os.environ.get("LOCALAPPDATA"):
+        config_root = Path(os.environ["LOCALAPPDATA"])
+    elif os.environ.get("XDG_CONFIG_HOME"):
+        config_root = Path(os.environ["XDG_CONFIG_HOME"])
+    else:
+        config_root = Path.home() / ".config"
+    return config_root / "llm_translation_tools" / "defaults.json"
 
 DEFAULT_SETTINGS: Dict[str, Any] = {
     "base_url": DEFAULT_BASE_URL,
@@ -124,14 +136,34 @@ class APIError(Exception):
 
 
 class SettingsStore:
-    """Validated settings, with connection settings global and prompt settings per project."""
+    """Validated current settings layered over durable user and project defaults."""
 
     _GLOBAL_KEYS = frozenset(("base_url", "allow_remote_lmstudio"))
     _ALL_KEYS = frozenset(DEFAULT_SETTINGS)
 
-    def __init__(self):
-        self._settings = dict(DEFAULT_SETTINGS)
+    def __init__(self, defaults_path: Optional[Path] = None):
+        self.defaults_path = (defaults_path or _default_settings_path()).resolve()
         self._lock = threading.RLock()
+        self._defaults = self._load_defaults()
+        self._settings = dict(self._defaults)
+
+    def _load_defaults(self) -> Dict[str, Any]:
+        candidate = dict(DEFAULT_SETTINGS)
+        if not self.defaults_path.is_file():
+            return candidate
+        try:
+            value = json.loads(self.defaults_path.read_text(encoding="utf-8"))
+            if not isinstance(value, Mapping):
+                raise ValueError("top-level value must be an object")
+            unknown = set(value) - self._ALL_KEYS
+            if unknown:
+                raise ValueError("unknown settings: %s" % ", ".join(sorted(unknown)))
+            candidate.update(value)
+            return self._validate(candidate)
+        except (APIError, OSError, UnicodeError, ValueError, json.JSONDecodeError) as exc:
+            print("Warning: ignoring invalid default settings at %s: %s" %
+                  (self.defaults_path, exc))
+            return dict(DEFAULT_SETTINGS)
 
     @classmethod
     def _validate(cls, candidate: Mapping[str, Any]) -> Dict[str, Any]:
@@ -177,7 +209,7 @@ class SettingsStore:
         saved = project.load_project_settings()
         with self._lock:
             global_values = {key: self._settings[key] for key in self._GLOBAL_KEYS}
-            candidate = dict(DEFAULT_SETTINGS)
+            candidate = dict(self._defaults)
             candidate.update(global_values)
             candidate.update(saved)
             self._settings = self._validate(candidate)
@@ -200,6 +232,36 @@ class SettingsStore:
             project.save_project_settings(candidate)
         with self._lock:
             self._settings = candidate
+        return dict(candidate)
+
+    def save_defaults(self, changes: Mapping[str, Any],
+                      project: Optional[Project]) -> Dict[str, Any]:
+        candidate = self.merged(changes)
+        try:
+            self.defaults_path.parent.mkdir(parents=True, exist_ok=True)
+            fd, temporary = tempfile.mkstemp(
+                prefix=".%s." % self.defaults_path.name,
+                suffix=".tmp", dir=str(self.defaults_path.parent))
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as stream:
+                    json.dump(candidate, stream, ensure_ascii=False, indent=2)
+                    stream.write("\n")
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(temporary, self.defaults_path)
+            except Exception:
+                try:
+                    os.unlink(temporary)
+                except OSError:
+                    pass
+                raise
+        except OSError as exc:
+            raise APIError(500, "could not save default settings: %s" % exc) from exc
+        if project is not None:
+            project.save_project_settings(candidate)
+        with self._lock:
+            self._defaults = dict(candidate)
+            self._settings = dict(candidate)
         return dict(candidate)
 
 
@@ -537,9 +599,10 @@ class AppState:
     def __init__(self, base_dir: Optional[Path] = None,
                  static_dir: Optional[Path] = None,
                  folder_picker: Optional[Callable[[Optional[str]], Optional[str]]] = None,
-                 tool_runner: Optional[Callable[..., Any]] = None):
+                 tool_runner: Optional[Callable[..., Any]] = None,
+                 defaults_path: Optional[Path] = None):
         self.projects = ProjectStore(base_dir)
-        self.settings = SettingsStore()
+        self.settings = SettingsStore(defaults_path)
         self.jobs = JobManager()
         self.tool_jobs = ToolJobManager(base_dir=base_dir, runner=tool_runner)
         self.static_dir = (static_dir or Path(__file__).with_name("static")).resolve()
@@ -760,6 +823,16 @@ class RequestHandler(BaseHTTPRequestHandler):
             if not isinstance(body, Mapping):
                 raise APIError(400, "request body must be an object")
             self._send_json(200, self.state.settings.update(body, self._project_or_none()))
+            return
+        if self.command == "PUT" and path == "/api/settings/defaults":
+            body = self._read_json()
+            if not isinstance(body, Mapping):
+                raise APIError(400, "request body must be an object")
+            settings = self.state.settings.save_defaults(body, self._project_or_none())
+            self._send_json(200, {
+                "settings": settings,
+                "path": str(self.state.settings.defaults_path),
+            })
             return
         if self.command == "GET" and path == "/api/models":
             settings = self.state.settings.get()

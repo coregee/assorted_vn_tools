@@ -1282,6 +1282,7 @@ dialog::backdrop {
 .dialog-footer {
   display: flex;
   flex: 0 0 auto;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: flex-end;
   gap: 8px;
@@ -1493,6 +1494,10 @@ noscript {
   .dialog-footer {
     padding-right: 15px;
     padding-left: 15px;
+  }
+
+  .dialog-status {
+    flex-basis: 100%;
   }
 
   .shortcut-list div {

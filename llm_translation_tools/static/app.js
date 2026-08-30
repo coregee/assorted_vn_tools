@@ -113,6 +113,10 @@
       return this.request(ENDPOINTS.settings, { method: "PUT", body: settings });
     },
 
+    saveDefaultSettings(settings) {
+      return this.request(ENDPOINTS.settings + "/defaults", { method: "PUT", body: settings });
+    },
+
     getModels() {
       return this.request(ENDPOINTS.models);
     },
@@ -205,7 +209,7 @@
     "settings-form", "setting-base-url", "setting-model", "models-list", "models-status", "setting-target-language",
     "setting-batch-mode", "setting-batch-limit", "setting-context-window", "setting-response-reserve", "setting-temperature",
     "setting-allow-remote", "setting-game-context", "setting-system-prompt", "load-models", "settings-status",
-    "save-settings", "shortcuts-button", "shortcuts-dialog",
+    "save-default-settings", "save-settings", "shortcuts-button", "shortcuts-dialog",
   ];
 
   const elements = Object.fromEntries(elementIds.map((id) => [id, document.getElementById(id)]));
@@ -1100,6 +1104,26 @@
     }
   }
 
+  async function saveSettingsAsDefault() {
+    clearError();
+    const settings = collectSettings();
+    if (!settings) return;
+    setButtonBusy($("save-default-settings"), true, "Saving default…");
+    $("settings-status").textContent = "Saving default…";
+    try {
+      const payload = await api.saveDefaultSettings(settings);
+      state.settings = normalizeSettings(payload);
+      applySettingsForm(state.settings);
+      $("settings-status").textContent = "Default saved for future projects";
+      setStatus("Default translation settings saved");
+    } catch (error) {
+      showError(error, "Could not save default settings");
+      $("settings-status").textContent = "Default not saved";
+    } finally {
+      setButtonBusy($("save-default-settings"), false);
+    }
+  }
+
   function normalizeModels(payload) {
     const raw = payload?.models ?? payload?.data ?? payload ?? [];
     if (!Array.isArray(raw)) return [];
@@ -1478,6 +1502,7 @@
     $("settings-button").addEventListener("click", openSettings);
     $("shortcuts-button").addEventListener("click", () => $("shortcuts-dialog").showModal());
     $("settings-form").addEventListener("submit", saveSettings);
+    $("save-default-settings").addEventListener("click", saveSettingsAsDefault);
     $("load-models").addEventListener("click", loadModels);
 
     document.querySelectorAll(".dialog-close").forEach((button) => {
