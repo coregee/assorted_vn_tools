@@ -20,6 +20,7 @@ one translation for every target ID, in the same order."""
 
 MESSAGE_OVERHEAD_TOKENS = 12
 MIN_RESPONSE_TOKENS = 64
+TURN_RETRY_COUNT = 3
 
 
 class TranslationError(Exception):
@@ -28,6 +29,11 @@ class TranslationError(Exception):
 
 class TranslationCancelled(TranslationError):
     pass
+
+
+def _retryable_lmstudio_error(error: LMStudioError) -> bool:
+    return (error.status is None or error.status in (408, 429) or
+            error.status >= 500)
 
 
 @dataclass
@@ -346,7 +352,7 @@ class TranslationEngine:
         except LMStudioError as exc:
             # Some loaded models/LM Studio versions reject response_format. Retry the same
             # first request without it; parsing remains strict below.
-            if structured_supported and exc.status is not None and 400 <= exc.status < 500:
+            if structured_supported and exc.status in (400, 404, 415, 422):
                 return self.client.chat_completion(
                     messages, model, temperature, max_tokens, None), False
             raise
@@ -401,36 +407,51 @@ class TranslationEngine:
                 context_start = 0
             request_messages = fit_batch_request(
                 history, batch, context_start, suggested, glossary, prompt_limit)
-            raw, structured_supported = self._complete(
-                request_messages, settings["model"], float(settings["temperature"]),
-                max_tokens, structured_supported)
-            try:
-                parsed = parse_translation_response(raw, batch.targets)
-                history = request_messages + [{"role": "assistant", "content": raw}]
-            except TranslationError as first_error:
-                if cancelled and cancelled():
+            attempt_messages = request_messages
+            parsed: Optional[List[Dict[str, str]]] = None
+            for attempt in range(TURN_RETRY_COUNT + 1):
+                if attempt and cancelled and cancelled():
                     raise TranslationCancelled("translation cancelled")
-                repair = (
-                    "Your previous response was invalid: %s\nRepair it now. Return only the "
-                    "exact JSON object, with every requested ID once and in order. Preserve every "
-                    "engine token from its source line." % first_error
-                )
-                repair_messages = _trim_old_turns(request_messages + [
-                    {"role": "assistant", "content": raw},
-                    {"role": "user", "content": repair},
-                ], prompt_limit, preserve_tail=3)
-                repaired, structured_supported = self._complete(
-                    repair_messages, settings["model"], float(settings["temperature"]),
-                    max_tokens, structured_supported)
                 try:
-                    parsed = parse_translation_response(repaired, batch.targets)
-                except TranslationError as second_error:
-                    raise TranslationError("model response stayed invalid after one repair: %s" %
-                                           second_error) from second_error
-                # Future context only needs the valid canonical turn, not repair chatter.
-                history = request_messages + [
-                    {"role": "assistant", "content": repaired},
-                ]
+                    raw, structured_supported = self._complete(
+                        attempt_messages, settings["model"],
+                        float(settings["temperature"]), max_tokens,
+                        structured_supported)
+                except LMStudioError as error:
+                    if attempt >= TURN_RETRY_COUNT or not _retryable_lmstudio_error(error):
+                        if attempt:
+                            raise TranslationError(
+                                "LM Studio request failed after %d retries: %s" %
+                                (attempt, error)
+                            ) from error
+                        raise
+                    continue
+
+                try:
+                    parsed = parse_translation_response(raw, batch.targets)
+                except TranslationError as error:
+                    if attempt >= TURN_RETRY_COUNT:
+                        raise TranslationError(
+                            "model response stayed invalid after %d retries: %s" %
+                            (attempt, error)
+                        ) from error
+                    repair = (
+                        "Your previous response was invalid: %s\nRetry this same turn now. "
+                        "Return only the exact JSON object, with every requested ID once and "
+                        "in order. Preserve every engine token from its source line." % error
+                    )
+                    attempt_messages = _trim_old_turns(request_messages + [
+                        {"role": "assistant", "content": raw},
+                        {"role": "user", "content": repair},
+                    ], prompt_limit, preserve_tail=3)
+                    continue
+
+                # Future context only needs the valid canonical turn, not retry chatter.
+                history = request_messages + [{"role": "assistant", "content": raw}]
+                break
+
+            if parsed is None:
+                raise TranslationError("translation turn ended without a valid response")
 
             targets_by_id = {line["id"]: line for line in batch.targets}
             turn_suggestions: List[Dict[str, Any]] = []

@@ -460,7 +460,7 @@
       checkbox.setAttribute("aria-label", `Select ${file.name} for batch translation`);
       const button = createElement("button", "file-item");
       button.type = "button";
-      button.disabled = Boolean(state.job) || state.saving;
+      button.disabled = state.saving;
       button.dataset.path = file.path;
       button.title = file.path;
       const active = state.activeFile?.path === file.path;
@@ -536,11 +536,6 @@
     if (!path || state.activeFile?.path === path) return;
     if (state.saving) return;
     if (!skipConfirm && !confirmCanLeave("open another script")) return;
-    if (state.job) {
-      showError("Cancel the active translation job before changing scripts.", "Translation in progress");
-      return;
-    }
-
     clearError();
     state.fileAbortController?.abort();
     state.fileAbortController = new AbortController();
@@ -1025,8 +1020,11 @@
     const job = state.job;
     $("job-panel").hidden = !job;
     if (!job) {
-      $("file-list").querySelectorAll("button, input").forEach((control) => {
-        control.disabled = state.saving;
+      $("file-list").querySelectorAll(".file-item").forEach((button) => {
+        button.disabled = state.saving;
+      });
+      $("file-list").querySelectorAll(".file-select").forEach((checkbox) => {
+        checkbox.disabled = state.saving;
       });
       updateFileSelectionUi();
       updateSelectionUi();
@@ -1043,7 +1041,8 @@
       ? `${job.completed} of ${job.total} lines`
       : job.status === "queued" ? "Waiting for LM Studio…" : "Building context and translating…");
     $("cancel-job").disabled = isFinishedStatus(job.status) || job.status === "cancelling";
-    $("file-list").querySelectorAll("button, input").forEach((control) => { control.disabled = true; });
+    $("file-list").querySelectorAll(".file-item").forEach((button) => { button.disabled = state.saving; });
+    $("file-list").querySelectorAll(".file-select").forEach((checkbox) => { checkbox.disabled = true; });
     updateFileSelectionUi();
     updateSelectionUi();
     updateDirtyUi();
@@ -1179,11 +1178,18 @@
 
   async function refreshTranslatedFiles({ preserveSelection = false } = {}) {
     const activePath = state.activeFile?.path;
+    const loadSequence = state.loadSequence;
     const selected = preserveSelection ? new Set(state.selected) : new Set();
     try {
       state.files = normalizeFiles(await api.getFiles());
-      if (activePath) {
-        state.activeFile = normalizeFile(await api.getFile(activePath), activePath);
+      if (activePath && loadSequence === state.loadSequence && state.activeFile?.path === activePath) {
+        const payload = await api.getFile(activePath);
+        if (loadSequence !== state.loadSequence || state.activeFile?.path !== activePath) {
+          renderProjectStats();
+          renderFileList();
+          return;
+        }
+        state.activeFile = normalizeFile(payload, activePath);
         state.selected = new Set(
           [...selected].filter((key) => state.activeFile.lines.some((line) => line.key === key))
         );

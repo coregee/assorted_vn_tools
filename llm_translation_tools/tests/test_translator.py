@@ -288,6 +288,59 @@ class TranslationCycleTests(unittest.TestCase):
         )
         self.assertIn("previous response was invalid", client.calls[1]["messages"][-1]["content"])
 
+    def test_timeout_retries_the_same_turn_before_committing(self):
+        target = line("script/a.json", 0, "こんにちは")
+        client = RecordingClient([
+            LMStudioError("request timed out"),
+            response_for(target["id"], "Hello."),
+        ])
+        committed = []
+
+        result = TranslationEngine(client).translate(
+            [{"path": "script/a.json", "lines": [target]}],
+            SETTINGS,
+            turn_completed=lambda _path, rows: committed.append(list(rows)),
+        )
+
+        self.assertEqual("Hello.", result[0]["suggestion"])
+        self.assertEqual(2, len(client.calls))
+        self.assertEqual(client.calls[0]["messages"], client.calls[1]["messages"])
+        self.assertEqual(1, len(committed))
+
+    def test_wrong_line_count_is_retried_until_the_turn_is_complete(self):
+        path = "script/a.json"
+        targets = [line(path, 0, "一"), line(path, 1, "二")]
+        incomplete = response_for(targets[0]["id"], "One.")
+        client = RecordingClient([
+            incomplete,
+            incomplete,
+            response_for_many(((targets[0], "One."), (targets[1], "Two."))),
+        ])
+
+        result = TranslationEngine(client).translate(
+            [{"path": path, "lines": targets}],
+            {**SETTINGS, "batch_limit": 2},
+        )
+
+        self.assertEqual(2, len(result))
+        self.assertEqual(3, len(client.calls))
+        self.assertIn("expected 2 translations, received 1",
+                      client.calls[1]["messages"][-1]["content"])
+
+    def test_invalid_turn_stops_after_three_retries(self):
+        path = "script/a.json"
+        targets = [line(path, 0, "一"), line(path, 1, "二")]
+        incomplete = response_for(targets[0]["id"], "One.")
+        client = RecordingClient([incomplete] * 4)
+
+        with self.assertRaisesRegex(TranslationError, "after 3 retries"):
+            TranslationEngine(client).translate(
+                [{"path": path, "lines": targets}],
+                {**SETTINGS, "batch_limit": 2},
+            )
+
+        self.assertEqual(4, len(client.calls))
+
     def test_structured_output_rejection_falls_back_to_plain_json(self):
         target = line("script/a.json", 0, "こんにちは")
         client = RecordingClient([

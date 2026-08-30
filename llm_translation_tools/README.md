@@ -70,7 +70,8 @@ conversation turns using:
    event file;
 5. translated speaker-glossary context and original on-screen row boundaries;
 6. a strict JSON response schema, exact ID/order validation, engine-token
-   preservation, and one corrective retry for malformed output.
+   preservation, and up to three retries for malformed/incomplete output or
+   transient LM Studio request failures.
 
 Each request adds only the chronological lines not already present in the
 conversation. Set **Batch by** to **Messages** to cap the number of target
@@ -116,6 +117,9 @@ Protected Dasaku engine-variable fields are read-only. Sstar `\xHH` and Etutane
 - Jobs save after every successful request turn. Cancelling or failing a later
   request preserves all earlier committed translations, including partial
   progress within the current file.
+- A request turn is not committed until its JSON contains every expected line
+  in order. Timeouts, connection failures, rate limits, server errors, and
+  invalid line counts are retried up to three times before the job stops.
 
 Native wrapping, byte limits, and character encoding rules still apply. The
 game-specific repacker remains the final validator.
