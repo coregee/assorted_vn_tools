@@ -467,6 +467,10 @@ class ProjectStore:
                 raise ProjectNotOpen("open a game folder first")
             return self._project
 
+    def clear(self) -> None:
+        with self._lock:
+            self._project = None
+
     def describe(self) -> Optional[Dict[str, Any]]:
         with self._lock:
             project = self._project

@@ -51,7 +51,26 @@
           <button class="button button-primary" id="open-project-button" type="submit">Open</button>
         </div>
         <p class="field-help">Choose a game folder containing <code>script/</code>, or the extracted <code>script</code> folder itself.</p>
+        <div class="project-tools">
+          <label for="project-toolset">Game toolset</label>
+          <select id="project-toolset">
+            <option value="">Auto-detect from folder</option>
+          </select>
+          <div class="project-tool-actions">
+            <button class="button button-secondary" id="extract-button" type="button">Extract scripts</button>
+            <button class="button button-secondary" id="repack-button" type="button">Repack scripts</button>
+          </div>
+          <p class="field-help">Runs the matching repository tool against this folder. Media and executable patches remain opt-in command-line operations.</p>
+        </div>
       </form>
+
+      <section class="tool-job-panel" id="tool-job-panel" aria-live="polite" hidden>
+        <div class="section-heading">
+          <strong id="tool-job-title">Game tool</strong>
+          <span id="tool-job-status"></span>
+        </div>
+        <pre id="tool-job-output"></pre>
+      </section>
 
       <section class="project-summary" id="project-summary" aria-label="Project summary" hidden>
         <p class="eyebrow">Project</p>

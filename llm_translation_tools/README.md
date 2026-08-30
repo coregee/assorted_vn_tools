@@ -32,6 +32,9 @@ The folder may be either:
 - a game/tool folder containing `script\`, or
 - the extracted `script` folder itself.
 
+Choose the actual game folder when using the in-app extract/repack actions. A
+direct `script` folder is still supported for editing only.
+
 The second form is useful for Dasaku when `extract.py -p ...` points at an
 external game, because that tool keeps its editable corpus beside the tool.
 
@@ -42,21 +45,31 @@ open a known folder immediately at launch.
 ## Workflow
 
 1. Start LM Studio's local server and load a chat/instruct model.
-2. Open the extracted script folder in the editor.
-3. Open **Settings**, load the model list, and select a model.
-4. Describe the game, characters, tone, terminology, and naming rules in
+2. Choose the target game folder in the editor.
+3. If scripts have not been extracted yet, choose the matching **Game toolset**
+   (or leave it on auto-detect) and use **Extract scripts**. The workbench runs
+   the repository's existing tool against the selected game folder and opens
+   the resulting script corpus when it succeeds.
+4. Open **Settings**, load the model list, and select a model.
+5. Describe the game, characters, tone, terminology, and naming rules in
    **Game context**. Customize the system prompt if needed.
-5. Open a JSON file and choose **Translate untranslated**, select individual
+6. Open a JSON file and choose **Translate untranslated**, select individual
    lines and choose **Translate selected**, or use **Re-translate file**. To
    process several files in order, select them in the sidebar and choose
    **Translate untranslated in selected files**.
-6. Model translations are written directly to each file's native target fields.
+7. Model translations are written directly to each file's native target fields.
    Use **Save changes** only for manual edits.
-7. Inspect the translated JSON and run the relevant toolset's `repack.py`.
+8. Inspect the translated JSON and use **Repack scripts** to run the matching
+   toolset against the selected game folder. The workbench saves pending edits
+   first and asks for confirmation before the repacker writes rebuilt game data.
 
 The editor also supports direct manual editing, source/translation search,
 speaker-name glossary files, protected non-translatable records, optimistic
 save conflict detection, and keyboard shortcuts shown from the `?` button.
+
+The in-app actions intentionally use each toolset's script-only default. Large
+image/audio processing and executable/font patches remain explicit command-line
+operations documented by the individual toolsets.
 
 ## Translation cycle
 

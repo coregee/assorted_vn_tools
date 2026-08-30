@@ -10,6 +10,8 @@
     settings: "/api/settings",
     models: "/api/models",
     jobs: "/api/jobs",
+    tools: "/api/tools",
+    toolJobs: "/api/tool-jobs",
   });
 
   class ApiError extends Error {
@@ -69,8 +71,11 @@
       return payload ?? {};
     },
 
-    openProject(path) {
-      return this.request(ENDPOINTS.project + "/open", { method: "POST", body: { path } });
+    openProject(path, targetPath = path) {
+      return this.request(ENDPOINTS.project + "/open", {
+        method: "POST",
+        body: { path, target_path: targetPath },
+      });
     },
 
     pickProjectFolder(initialPath) {
@@ -112,6 +117,21 @@
       return this.request(ENDPOINTS.models);
     },
 
+    getTools() {
+      return this.request(ENDPOINTS.tools);
+    },
+
+    createToolJob(action, path, toolset) {
+      return this.request(ENDPOINTS.toolJobs, {
+        method: "POST",
+        body: { action, path, toolset: toolset || null, confirmed: action === "repack" },
+      });
+    },
+
+    getToolJob(id) {
+      return this.request(`${ENDPOINTS.toolJobs}/${encodeURIComponent(id)}`);
+    },
+
     createJob(payload) {
       return this.request(ENDPOINTS.jobs, { method: "POST", body: payload });
     },
@@ -150,6 +170,7 @@
 
   const state = {
     projectPath: "",
+    targetPath: "",
     files: [],
     projectStats: {},
     activeFile: null,
@@ -160,6 +181,8 @@
     job: null,
     jobPollTimer: null,
     jobPollFailures: 0,
+    toolJob: null,
+    toolJobPollTimer: null,
     saving: false,
     fileFilter: "",
     lineFilter: "",
@@ -169,7 +192,9 @@
 
   const elementIds = [
     "connection-dot", "project-label", "error-banner", "error-title", "error-message", "dismiss-error",
-    "open-project-form", "project-path", "browse-project-button", "open-project-button", "project-summary", "project-path-label",
+    "open-project-form", "project-path", "browse-project-button", "open-project-button", "project-toolset",
+    "extract-button", "repack-button", "tool-job-panel", "tool-job-title", "tool-job-status", "tool-job-output",
+    "project-summary", "project-path-label",
     "stat-files", "stat-lines", "stat-translated", "project-progress", "completion-label", "file-browser",
     "file-filter", "file-count", "file-list", "no-files", "selected-file-count", "select-all-files",
     "select-no-files", "translate-files", "welcome-state", "choose-folder-button", "editor",
@@ -346,7 +371,7 @@
 
   function extractProjectPath(payload, fallback = "") {
     const project = payload?.project ?? payload ?? {};
-    return String(project.path ?? project.root ?? project.project_path ?? payload?.path ?? fallback);
+    return String(project.path ?? project.root ?? project.project_path ?? payload?.target?.path ?? payload?.path ?? fallback);
   }
 
   function extractProjectStats(payload) {
@@ -354,20 +379,26 @@
     return project.stats && typeof project.stats === "object" ? project.stats : {};
   }
 
+  function extractTargetPath(payload, fallback = "") {
+    return String(payload?.target?.path ?? extractProjectPath(payload, fallback));
+  }
+
   function applyProject(payload, fallbackPath = "") {
     state.fileAbortController?.abort();
     state.loadSequence += 1;
     const files = normalizeFiles(payload);
     state.projectPath = extractProjectPath(payload, fallbackPath) || fallbackPath;
+    state.targetPath = extractTargetPath(payload, fallbackPath) || fallbackPath;
     state.files = files;
     state.projectStats = extractProjectStats(payload);
     state.activeFile = null;
     state.selectedFiles.clear();
     state.selected.clear();
     state.dirty.clear();
-    safeStorageSet("translation-workbench.project-path", state.projectPath);
-    $("project-path").value = state.projectPath;
+    safeStorageSet("translation-workbench.project-path", state.targetPath);
+    $("project-path").value = state.targetPath;
     renderProject();
+    updateToolUi();
   }
 
   async function fetchProjectFiles(openPayload = null) {
@@ -503,6 +534,34 @@
     $("translate-files").disabled = busy || count === 0;
   }
 
+  function toolJobIsActive() {
+    return state.toolJob && ["queued", "running"].includes(state.toolJob.status);
+  }
+
+  function updateToolUi() {
+    const hasPath = Boolean($("project-path").value.trim());
+    const busy = state.saving || Boolean(state.job) || toolJobIsActive();
+    $("extract-button").disabled = busy || !hasPath;
+    $("repack-button").disabled = busy || !hasPath;
+    $("project-toolset").disabled = busy;
+  }
+
+  function renderToolJob() {
+    const job = state.toolJob;
+    $("tool-job-panel").hidden = !job;
+    if (!job) {
+      $("tool-job-output").textContent = "";
+      updateToolUi();
+      return;
+    }
+    const action = job.action === "repack" ? "Repack" : "Extract";
+    $("tool-job-title").textContent = `${action} · ${job.toolset_label || job.toolset || "game tool"}`;
+    $("tool-job-status").textContent = job.status || "queued";
+    $("tool-job-output").textContent = job.output || (toolJobIsActive() ? "Waiting for tool output…" : "No output.");
+    $("tool-job-output").scrollTop = $("tool-job-output").scrollHeight;
+    updateToolUi();
+  }
+
   function confirmCanLeave(action) {
     const dirtyCount = state.dirty.size;
     if (!dirtyCount) return true;
@@ -511,6 +570,10 @@
 
   function canOpenAnotherProject() {
     if (state.saving) return;
+    if (toolJobIsActive()) {
+      showError("Wait for the extract or repack operation to finish before opening another folder.", "Game tool in progress");
+      return false;
+    }
     if (state.job) {
       showError("Cancel the active translation job before opening another project.", "Translation in progress");
       return false;
@@ -518,18 +581,22 @@
     return confirmCanLeave("open another folder");
   }
 
-  async function openProjectPath(path) {
+  async function openProjectPath(path, { targetPath = path } = {}) {
     clearError();
     setButtonBusy($("open-project-button"), true, "Opening…");
     setStatus("Opening project…");
     try {
-      const opened = await api.openProject(path);
+      const opened = await api.openProject(path, targetPath);
       state.projectPath = path;
       const payload = await fetchProjectFiles(opened);
       applyProject(payload, extractProjectPath(opened, path));
       await loadSettings({ showErrors: true });
-      setStatus(`Opened ${state.files.length} script file${state.files.length === 1 ? "" : "s"}`);
-      if (state.files.length) await loadFile(state.files[0].path, { skipConfirm: true });
+      if (state.files.length) {
+        setStatus(`Opened ${state.files.length} script file${state.files.length === 1 ? "" : "s"}`);
+        await loadFile(state.files[0].path, { skipConfirm: true });
+      } else {
+        setStatus("Target folder selected; extract scripts to begin");
+      }
     } catch (error) {
       showError(error, "Could not open folder");
       setStatus("Folder could not be opened");
@@ -570,6 +637,86 @@
       trigger.textContent = originalLabel;
       trigger.removeAttribute("aria-busy");
       controls.forEach((control) => { control.disabled = state.saving; });
+      updateToolUi();
+    }
+  }
+
+  async function loadToolsets() {
+    try {
+      const payload = await api.getTools();
+      const toolsets = Array.isArray(payload?.toolsets) ? payload.toolsets : [];
+      const current = $("project-toolset").value;
+      const options = [new Option("Auto-detect from folder", "")];
+      toolsets.forEach((toolset) => options.push(new Option(String(toolset.label), String(toolset.id))));
+      $("project-toolset").replaceChildren(...options);
+      if ([...$("project-toolset").options].some((option) => option.value === current)) {
+        $("project-toolset").value = current;
+      }
+    } catch (error) {
+      showError(error, "Could not load game toolsets");
+    }
+  }
+
+  async function startToolJob(action) {
+    if (state.saving || state.job || toolJobIsActive()) return;
+    clearError();
+    const path = $("project-path").value.trim();
+    if (!path) {
+      showError("Choose the target game folder first.", "Folder required");
+      return;
+    }
+    if (state.dirty.size && !(await saveActiveFile())) return;
+    if (action === "repack" && !window.confirm(
+      `Repack the edited scripts into ${path}?\n\nThe game tools preserve their original backups, but this writes rebuilt data into the target folder.`
+    )) return;
+
+    setStatus(`${action === "repack" ? "Repacking" : "Extracting"} scripts…`);
+    try {
+      state.toolJob = await api.createToolJob(action, path, $("project-toolset").value);
+      if (state.toolJob.toolset) $("project-toolset").value = state.toolJob.toolset;
+      renderToolJob();
+      scheduleToolJobPoll(300);
+    } catch (error) {
+      showError(error, `Could not start ${action}`);
+      setStatus(`${action === "repack" ? "Repack" : "Extraction"} did not start`);
+      updateToolUi();
+    }
+  }
+
+  function scheduleToolJobPoll(delay = 700) {
+    clearTimeout(state.toolJobPollTimer);
+    state.toolJobPollTimer = window.setTimeout(pollToolJob, delay);
+  }
+
+  async function pollToolJob() {
+    if (!state.toolJob?.id) return;
+    const id = state.toolJob.id;
+    try {
+      state.toolJob = await api.getToolJob(id);
+      renderToolJob();
+      if (toolJobIsActive()) {
+        scheduleToolJobPoll();
+        return;
+      }
+      if (state.toolJob.status !== "completed") {
+        showError(state.toolJob.error || "The game tool failed. See its output for details.", "Game tool failed");
+        setStatus(`${state.toolJob.action === "repack" ? "Repack" : "Extraction"} failed`);
+        return;
+      }
+      const finished = state.toolJob;
+      setStatus(`${finished.action === "repack" ? "Repacked" : "Extracted"} scripts successfully`);
+      if (finished.action === "extract") {
+        await openProjectPath(finished.project_path || finished.target_path, {
+          targetPath: finished.target_path,
+        });
+      } else if (state.activeFile) {
+        await refreshTranslatedFiles({ preserveSelection: true });
+      }
+    } catch (error) {
+      showError(error, "Could not read game tool status");
+      setStatus("Game tool status unavailable");
+    } finally {
+      updateToolUi();
     }
   }
 
@@ -853,6 +1000,7 @@
     $("browse-project-button").disabled = saving;
     $("open-project-button").disabled = saving;
     $("choose-folder-button").disabled = saving;
+    updateToolUi();
     $("file-list").querySelectorAll(".file-item").forEach((button) => { button.disabled = saving; });
     $("line-list").querySelectorAll(".line-select").forEach((input) => {
       const line = findLine(input.dataset.lineKey);
@@ -1072,6 +1220,7 @@
       updateFileSelectionUi();
       updateSelectionUi();
       updateDirtyUi();
+      updateToolUi();
       return;
     }
     const hasProgress = job.percentage !== null;
@@ -1089,10 +1238,11 @@
     updateFileSelectionUi();
     updateSelectionUi();
     updateDirtyUi();
+    updateToolUi();
   }
 
   async function startTranslation(scope) {
-    if ((!state.activeFile && scope !== "files") || state.job || state.saving) return;
+    if ((!state.activeFile && scope !== "files") || state.job || toolJobIsActive() || state.saving) return;
     clearError();
     let filePaths;
     let lineIds;
@@ -1293,8 +1443,12 @@
         const descriptor = await api.getProject();
         const serverPath = extractProjectPath(descriptor, "");
         if (!serverPath) return;
-        const filesPayload = normalizeFiles(descriptor).length ? descriptor : await api.getFiles();
-        payload = { ...filesPayload, project: descriptor.project ?? descriptor };
+        if (!descriptor.project && !normalizeFiles(descriptor).length) {
+          payload = descriptor;
+        } else {
+          const filesPayload = normalizeFiles(descriptor).length ? descriptor : await api.getFiles();
+          payload = { ...filesPayload, project: descriptor.project ?? descriptor };
+        }
       } catch (error) {
         if (![404, 405].includes(error.status)) throw error;
         payload = await api.getFiles();
@@ -1316,6 +1470,9 @@
     $("open-project-form").addEventListener("submit", handleOpenProject);
     $("browse-project-button").addEventListener("click", (event) => browseForProject(event.currentTarget));
     $("choose-folder-button").addEventListener("click", (event) => browseForProject(event.currentTarget));
+    $("project-path").addEventListener("input", updateToolUi);
+    $("extract-button").addEventListener("click", () => startToolJob("extract"));
+    $("repack-button").addEventListener("click", () => startToolJob("repack"));
     $("dismiss-error").addEventListener("click", clearError);
     $("save-button").addEventListener("click", () => saveActiveFile());
     $("settings-button").addEventListener("click", openSettings);
@@ -1410,7 +1567,7 @@
     });
 
     window.addEventListener("beforeunload", (event) => {
-      if (!state.dirty.size && !state.job && !state.saving) return;
+      if (!state.dirty.size && !state.job && !toolJobIsActive() && !state.saving) return;
       event.preventDefault();
       event.returnValue = "";
     });
@@ -1420,7 +1577,8 @@
     bindEvents();
     applySettingsForm();
     setStatus("Connecting to local server…");
-    await Promise.all([loadSettings(), restoreProject()]);
+    await Promise.all([loadSettings(), loadToolsets(), restoreProject()]);
+    updateToolUi();
     if (!state.activeFile) setStatus("Ready");
   }
 

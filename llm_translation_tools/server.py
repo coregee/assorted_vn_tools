@@ -5,6 +5,8 @@ from __future__ import annotations
 import ipaddress
 import json
 import mimetypes
+import subprocess
+import sys
 import threading
 import uuid
 import webbrowser
@@ -26,6 +28,13 @@ from .translator import (DEFAULT_SYSTEM_PROMPT, TranslationCancelled,
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
 MAX_REQUEST_BYTES = 2 * 1024 * 1024
+MAX_TOOL_OUTPUT_CHARS = 1024 * 1024
+
+TOOLSETS: Dict[str, Dict[str, str]] = {
+    "dasaku": {"label": "Dasaku", "directory": "dasaku_tools"},
+    "etutane": {"label": "Etsuraku no Tane", "directory": "etutane_tools"},
+    "sstar": {"label": "Shining Star", "directory": "sstar_tools"},
+}
 
 DEFAULT_SETTINGS: Dict[str, Any] = {
     "base_url": DEFAULT_BASE_URL,
@@ -352,16 +361,202 @@ class JobManager:
                 "suggestions": list(job.suggestions),
             }
 
+    def has_active(self) -> bool:
+        with self._lock:
+            return any(job.status in ("queued", "running") for job in self._jobs.values())
+
+
+@dataclass
+class ToolJob:
+    id: str
+    action: str
+    toolset: str
+    target_path: str
+    project_path: str
+    status: str = "queued"
+    output: str = ""
+    returncode: Optional[int] = None
+    error: Optional[str] = None
+    created_at: str = field(default_factory=_utc_now)
+    started_at: Optional[str] = None
+    finished_at: Optional[str] = None
+    lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
+
+    def snapshot(self) -> Dict[str, Any]:
+        with self.lock:
+            return {
+                "id": self.id,
+                "action": self.action,
+                "toolset": self.toolset,
+                "toolset_label": TOOLSETS[self.toolset]["label"],
+                "target_path": self.target_path,
+                "project_path": self.project_path,
+                "status": self.status,
+                "output": self.output,
+                "returncode": self.returncode,
+                "error": self.error,
+                "created_at": self.created_at,
+                "started_at": self.started_at,
+                "finished_at": self.finished_at,
+            }
+
+
+def _resolve_tool_target(path: Any, base_dir: Path) -> Path:
+    if not isinstance(path, str) or not path.strip():
+        raise APIError(400, "target folder path is required")
+    try:
+        target = Path(path).expanduser()
+        if not target.is_absolute():
+            target = base_dir / target
+        target = target.resolve(strict=True)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise APIError(400, "target folder does not exist: %s" % path) from exc
+    if not target.is_dir():
+        raise APIError(400, "target folder is not a directory: %s" % path)
+    return target
+
+
+def _detect_toolset(target: Path) -> Optional[str]:
+    candidates = set()
+    if ((target / "dasaku_HD.exe").is_file()
+            or ((target / "spt").is_dir() and (target / "dwq").is_dir())):
+        candidates.add("dasaku")
+    if (target / "script.dat").is_file():
+        candidates.add("sstar")
+
+    try:
+        from etutane_tools.libraries import workspace as etutane_workspace
+        if "scenario" in etutane_workspace.discover_archives(str(target)):
+            candidates.add("etutane")
+    except Exception:
+        pass
+
+    if not candidates:
+        try:
+            schemas = {item["schema"] for item in Project.open(str(target)).list_files()}
+        except ProjectError:
+            schemas = set()
+        if schemas & {"dasaku", "dasaku-ui"}:
+            candidates.add("dasaku")
+        if "etutane" in schemas:
+            candidates.add("etutane")
+        if "sstar" in schemas:
+            candidates.add("sstar")
+    return next(iter(candidates)) if len(candidates) == 1 else None
+
+
+class ToolJobManager:
+    """Run the repository's script-only extract/repack entry points one at a time."""
+
+    def __init__(self, base_dir: Optional[Path] = None,
+                 tool_root: Optional[Path] = None,
+                 runner: Optional[Callable[..., Any]] = None):
+        self.base_dir = (base_dir or Path.cwd()).resolve()
+        self.tool_root = (tool_root or Path(__file__).resolve().parent.parent).resolve()
+        self._runner = runner or subprocess.run
+        self._jobs: Dict[str, ToolJob] = {}
+        self._lock = threading.RLock()
+
+    def toolsets(self) -> List[Dict[str, str]]:
+        return [{"id": key, "label": value["label"]}
+                for key, value in TOOLSETS.items()]
+
+    def start(self, action: Any, path: Any, toolset: Any = None) -> ToolJob:
+        if action not in ("extract", "repack"):
+            raise APIError(400, "action must be 'extract' or 'repack'")
+        target = _resolve_tool_target(path, self.base_dir)
+        if toolset in (None, ""):
+            toolset = _detect_toolset(target)
+            if toolset is None:
+                raise APIError(
+                    422, "could not determine the game toolset; choose one explicitly")
+        if not isinstance(toolset, str) or toolset not in TOOLSETS:
+            raise APIError(400, "unknown game toolset")
+        script = self.tool_root / TOOLSETS[toolset]["directory"] / (action + ".py")
+        if not script.is_file():
+            raise APIError(500, "tool entry point is missing: %s" % script)
+        with self._lock:
+            if any(job.status in ("queued", "running") for job in self._jobs.values()):
+                raise APIError(409, "another extract or repack operation is already running")
+            complete = [item for item in self._jobs.values()
+                        if item.status in ("completed", "failed")]
+            for old in sorted(complete, key=lambda item: item.created_at)[:-19]:
+                self._jobs.pop(old.id, None)
+            project_path = (self.tool_root / TOOLSETS[toolset]["directory"]
+                            if toolset == "dasaku" else target)
+            job = ToolJob(
+                uuid.uuid4().hex, action, toolset, str(target), str(project_path))
+            self._jobs[job.id] = job
+        thread = threading.Thread(
+            target=self._run, args=(job, script),
+            name="%s-%s" % (action, job.id[:8]), daemon=True)
+        thread.start()
+        return job
+
+    def _run(self, job: ToolJob, script: Path) -> None:
+        with job.lock:
+            job.status = "running"
+            job.started_at = _utc_now()
+        command = [sys.executable, str(script), "-p", job.target_path]
+        try:
+            result = self._runner(
+                command, cwd=str(script.parent), capture_output=True, text=True,
+                encoding="utf-8", errors="replace", check=False)
+            output = (result.stdout or "")
+            if result.stderr:
+                output += (("\n" if output and not output.endswith("\n") else "")
+                           + result.stderr)
+            if len(output) > MAX_TOOL_OUTPUT_CHARS:
+                output = "[earlier output truncated]\n" + output[-MAX_TOOL_OUTPUT_CHARS:]
+            with job.lock:
+                job.output = output
+                job.returncode = int(result.returncode)
+                job.status = "completed" if result.returncode == 0 else "failed"
+                if result.returncode != 0:
+                    job.error = "%s failed with exit code %d" % (job.action, result.returncode)
+                job.finished_at = _utc_now()
+        except Exception as exc:
+            with job.lock:
+                job.status = "failed"
+                job.error = str(exc) or exc.__class__.__name__
+                job.finished_at = _utc_now()
+
+    def get(self, job_id: str) -> ToolJob:
+        with self._lock:
+            job = self._jobs.get(job_id)
+        if job is None:
+            raise APIError(404, "extract/repack job not found")
+        return job
+
+    def has_active(self) -> bool:
+        with self._lock:
+            return any(job.status in ("queued", "running") for job in self._jobs.values())
+
 
 class AppState:
     def __init__(self, base_dir: Optional[Path] = None,
                  static_dir: Optional[Path] = None,
-                 folder_picker: Optional[Callable[[Optional[str]], Optional[str]]] = None):
+                 folder_picker: Optional[Callable[[Optional[str]], Optional[str]]] = None,
+                 tool_runner: Optional[Callable[..., Any]] = None):
         self.projects = ProjectStore(base_dir)
         self.settings = SettingsStore()
         self.jobs = JobManager()
+        self.tool_jobs = ToolJobManager(base_dir=base_dir, runner=tool_runner)
         self.static_dir = (static_dir or Path(__file__).with_name("static")).resolve()
         self.folder_picker = folder_picker or _pick_directory
+        self.target_path: Optional[str] = None
+        self._target_lock = threading.RLock()
+        self.operation_lock = threading.RLock()
+
+    def set_target(self, path: Any) -> str:
+        target = str(_resolve_tool_target(path, self.projects.base_dir))
+        with self._target_lock:
+            self.target_path = target
+        return target
+
+    def get_target(self) -> Optional[str]:
+        with self._target_lock:
+            return self.target_path
 
 
 class TranslationHTTPServer(ThreadingHTTPServer):
@@ -470,10 +665,15 @@ class RequestHandler(BaseHTTPRequestHandler):
 
         if self.command == "GET" and path == "/api/project":
             description = self.state.projects.describe()
+            target = self.state.get_target()
             self._send_json(200, {
                 "project": description,
                 "files": description.get("files", []) if description else [],
+                "target": {"path": target} if target else None,
             })
+            return
+        if self.command == "GET" and path == "/api/tools":
+            self._send_json(200, {"toolsets": self.state.tool_jobs.toolsets()})
             return
         if self.command == "POST" and path == "/api/project/pick":
             body = self._read_json()
@@ -492,12 +692,48 @@ class RequestHandler(BaseHTTPRequestHandler):
             body = self._read_json()
             if not isinstance(body, Mapping):
                 raise APIError(400, "request body must be an object")
-            project = self.state.projects.open(body.get("path"), body.get("script_dir"))
+            project_path = body.get("path")
+            target = self.state.set_target(body.get("target_path") or project_path)
+            try:
+                project = self.state.projects.open(project_path, body.get("script_dir"))
+            except ProjectError as exc:
+                fallback = (self.state.tool_jobs.tool_root
+                            / TOOLSETS["dasaku"]["directory"])
+                if (body.get("script_dir") in (None, "")
+                        and _detect_toolset(Path(target)) == "dasaku"
+                        and str(fallback) != str(project_path)):
+                    try:
+                        project = self.state.projects.open(str(fallback))
+                    except ProjectError:
+                        project = None
+                    if project is not None:
+                        settings = self.state.settings.activate_project(project)
+                        self._send_json(200, {
+                            "project": self.state.projects.describe(),
+                            "files": project.list_files(),
+                            "settings": settings,
+                            "target": {"path": target, "extracted": True},
+                        })
+                        return
+                missing_scripts = (body.get("script_dir") in (None, "")
+                                   and ("no extracted script folder" in str(exc)
+                                        or "no recognized extracted script JSON" in str(exc)))
+                if not missing_scripts:
+                    raise
+                self.state.projects.clear()
+                self._send_json(200, {
+                    "project": None,
+                    "files": [],
+                    "settings": self.state.settings.get(),
+                    "target": {"path": target, "extracted": False},
+                })
+                return
             settings = self.state.settings.activate_project(project)
             self._send_json(200, {
                 "project": self.state.projects.describe(),
                 "files": project.list_files(),
                 "settings": settings,
+                "target": {"path": target, "extracted": True},
             })
             return
         if self.command == "GET" and path == "/api/files":
@@ -531,6 +767,29 @@ class RequestHandler(BaseHTTPRequestHandler):
                                     timeout=15.0)
             self._send_json(200, {"models": client.models()})
             return
+        if self.command == "POST" and path == "/api/tool-jobs":
+            body = self._read_json()
+            if not isinstance(body, Mapping):
+                raise APIError(400, "request body must be an object")
+            unknown = set(body) - {"action", "path", "toolset", "confirmed"}
+            if unknown:
+                raise APIError(400, "unknown tool-job fields: %s" %
+                               ", ".join(sorted(unknown)))
+            if body.get("action") == "repack" and body.get("confirmed") is not True:
+                raise APIError(400, "repack requires explicit confirmation")
+            with self.state.operation_lock:
+                if self.state.jobs.has_active():
+                    raise APIError(409, "cancel the active translation job first")
+                job = self.state.tool_jobs.start(
+                    body.get("action"), body.get("path"), body.get("toolset"))
+            self._send_json(202, job.snapshot())
+            return
+        tool_job_prefix = "/api/tool-jobs/"
+        if self.command == "GET" and path.startswith(tool_job_prefix):
+            job_id = path[len(tool_job_prefix):]
+            if job_id and "/" not in job_id:
+                self._send_json(200, self.state.tool_jobs.get(job_id).snapshot())
+                return
         if self.command == "POST" and path == "/api/jobs":
             body = self._read_json()
             if not isinstance(body, Mapping):
@@ -553,7 +812,11 @@ class RequestHandler(BaseHTTPRequestHandler):
                 raise APIError(400, "files must be an array")
             if line_ids is not None and not isinstance(line_ids, list):
                 raise APIError(400, "line_ids must be an array")
-            job = self.state.jobs.create(self.state.projects.current(), settings, files, line_ids)
+            with self.state.operation_lock:
+                if self.state.tool_jobs.has_active():
+                    raise APIError(409, "wait for the extract or repack operation to finish")
+                job = self.state.jobs.create(
+                    self.state.projects.current(), settings, files, line_ids)
             self._send_json(202, job.snapshot())
             return
 
@@ -646,6 +909,7 @@ def run(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, open_browser: bool =
     if project_path:
         project = state.projects.open(project_path, script_dir)
         state.settings.activate_project(project)
+        state.target_path = project.root_string
     server = create_server(host, port, state)
     actual_port = server.server_address[1]
     display_host = "[%s]" % host if ":" in host and not host.startswith("[") else host

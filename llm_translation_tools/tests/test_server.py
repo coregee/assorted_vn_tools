@@ -127,6 +127,10 @@ class ServerIntegrationTests(unittest.TestCase):
         status, html, headers = self.request("/")
         self.assertEqual(200, status)
         self.assertIn(b"VN Translation Workbench", html)
+        self.assertIn(b'id="browse-project-button"', html)
+        self.assertIn(b'id="choose-folder-button"', html)
+        self.assertIn(b'id="extract-button"', html)
+        self.assertIn(b'id="repack-button"', html)
         self.assertIn("default-src 'self'", headers["Content-Security-Policy"])
         self.assertEqual(200, self.request("/styles.css")[0])
         self.assertEqual(200, self.request("/app.js")[0])
@@ -179,6 +183,109 @@ class ServerIntegrationTests(unittest.TestCase):
             "/api/project/pick", "POST", {"initial_path": 123})
         self.assertEqual(400, status)
         self.assertIn("must be a string", payload["error"]["message"])
+
+    def test_script_tool_job_uses_selected_target_and_reports_output(self):
+        calls = []
+
+        def runner(command, **kwargs):
+            calls.append((command, kwargs))
+            return mock.Mock(returncode=0, stdout="scripts extracted\n", stderr="")
+
+        self.state.tool_jobs._runner = runner
+        tools = self.request("/api/tools")[1]["toolsets"]
+        self.assertEqual(["dasaku", "etutane", "sstar"],
+                         [item["id"] for item in tools])
+
+        created = self.request(
+            "/api/tool-jobs", "POST",
+            {"action": "extract", "path": str(self.root), "toolset": "dasaku"},
+        )[1]
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            job = self.request("/api/tool-jobs/" + created["id"])[1]
+            if job["status"] in ("completed", "failed"):
+                break
+            time.sleep(0.02)
+        else:
+            self.fail("extract job did not finish")
+
+        self.assertEqual("completed", job["status"], job.get("error"))
+        self.assertEqual("scripts extracted\n", job["output"])
+        self.assertEqual("dasaku_tools", Path(job["project_path"]).name)
+        command, options = calls[0]
+        self.assertEqual("extract.py", Path(command[1]).name)
+        self.assertEqual(["-p", str(self.root)], command[-2:])
+        self.assertEqual(str(Path(command[1]).parent), options["cwd"])
+        self.assertFalse(options["check"])
+
+        sstar_target = Path(self.temporary.name) / "shining star game"
+        sstar_target.mkdir()
+        (sstar_target / "script.dat").write_bytes(b"fixture signature")
+        status, payload = self.error(
+            "/api/tool-jobs", "POST",
+            {"action": "repack", "path": str(sstar_target), "toolset": None})
+        self.assertEqual(400, status)
+        self.assertIn("explicit confirmation", payload["error"]["message"])
+        auto = self.request(
+            "/api/tool-jobs", "POST",
+            {"action": "repack", "path": str(sstar_target), "toolset": None,
+             "confirmed": True},
+        )[1]
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            detected = self.request("/api/tool-jobs/" + auto["id"])[1]
+            if detected["status"] in ("completed", "failed"):
+                break
+            time.sleep(0.02)
+        else:
+            self.fail("auto-detected repack job did not finish")
+        self.assertEqual("completed", detected["status"], detected.get("error"))
+        self.assertEqual("sstar", detected["toolset"])
+        self.assertEqual("repack.py", Path(calls[1][0][1]).name)
+
+        ambiguous = Path(self.temporary.name) / "unknown game"
+        ambiguous.mkdir()
+        status, payload = self.error(
+            "/api/tool-jobs", "POST",
+            {"action": "extract", "path": str(ambiguous), "toolset": None})
+        self.assertEqual(422, status)
+        self.assertIn("choose one explicitly", payload["error"]["message"])
+
+    def test_unextracted_target_replaces_the_previous_project(self):
+        self.open_project()
+        target = Path(self.temporary.name) / "fresh game"
+        target.mkdir()
+        opened = self.request(
+            "/api/project/open", "POST", {"path": str(target)})[1]
+        self.assertIsNone(opened["project"])
+        self.assertEqual([], opened["files"])
+        self.assertEqual(str(target), opened["target"]["path"])
+        self.assertFalse(opened["target"]["extracted"])
+
+        restored = self.request("/api/project")[1]
+        self.assertIsNone(restored["project"])
+        self.assertEqual([], restored["files"])
+        self.assertEqual(str(target), restored["target"]["path"])
+        self.assertEqual(409, self.error("/api/files")[0])
+
+    def test_dasaku_target_keeps_game_folder_separate_from_tool_corpus(self):
+        tool_root = Path(self.temporary.name) / "tool repo"
+        corpus = tool_root / "dasaku_tools" / "script"
+        corpus.mkdir(parents=True)
+        (corpus / "route.json").write_text(
+            json.dumps([{"message": "原文", "translated": None}], ensure_ascii=False),
+            encoding="utf-8",
+        )
+        self.state.tool_jobs.tool_root = tool_root
+
+        game = Path(self.temporary.name) / "dasaku game"
+        game.mkdir()
+        (game / "dasaku_HD.exe").write_bytes(b"fixture")
+        opened = self.request(
+            "/api/project/open", "POST", {"path": str(game)})[1]
+        self.assertEqual(str(game), opened["target"]["path"])
+        self.assertEqual(str(tool_root / "dasaku_tools"), opened["project"]["root"])
+        self.assertEqual(1, len(opened["files"]))
 
     def test_security_rejects_traversal_cross_origin_and_remote_lm(self):
         self.open_project()
