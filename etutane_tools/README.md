@@ -12,10 +12,16 @@ Python 3.7+
 
 1. Run `python extract.py` within the game folder (or supply a path).
 2. Edit the extracted assets:
-   - dialogue/narration in `script\*.json` (fill each line's `translated` field),
+   - dialogue/narration in `script\*.json` (fill each page's `translated` field),
    - speaker names in `script\_names.json` (map each 【name】 to its translation),
    - images in `image\*.png`, audio in `audio\*.ogg` (only if extracted; see below).
-3. Run `python repack.py` to apply any translated lines to the original files.
+3. Run `python repack.py` to apply any translated pages to the original files.
+
+Each extracted entry is one displayed dialogue/narration page, not one physical engine
+string. `jp_lines` preserves the original on-screen lines and `string_indices` records
+the corresponding binary string slots. Repacking word-wraps the page translation and
+adds/removes physical line records as needed within the page's 3-line dialogue or
+4-line narration budget.
 
 By default, extract/repack only target the scripts. Pass `-i`/`-a` to also process
 images/audio — these archives are large, so repacking them takes significantly longer.

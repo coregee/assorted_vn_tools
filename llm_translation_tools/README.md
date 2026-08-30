@@ -80,6 +80,10 @@ the next request begins. The editor reloads those committed translations as
 job progress advances. Within a file, translation runs in chronological
 conversation turns using:
 
+For Etutane, one message is an actual displayed dialogue/narration page. Its
+physical Japanese rows are supplied together as source segments, so the model
+translates the page as a coherent unit rather than translating each row alone.
+
 1. an editable system prompt, target language, and game-level context;
 2. every earlier line in the file, in native order, including existing
    translations where available;

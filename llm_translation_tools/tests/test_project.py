@@ -63,9 +63,11 @@ class ProjectAdapterTests(unittest.TestCase):
                 "file": "A000.a0",
                 "lines": [{
                     "i": 3,
+                    "string_indices": [3, 4],
                     "kind": "dialogue",
                     "speaker": "花子",
-                    "jp": "元気？ «FE»",
+                    "jp": "元気？\n大丈夫？",
+                    "jp_lines": ["元気？", "大丈夫？"],
                     "translated": None,
                 }],
             },
@@ -103,7 +105,8 @@ class ProjectAdapterTests(unittest.TestCase):
             {path: item["schema"] for path, item in summaries.items()},
         )
         etutane = self.project.read_file("script/etutane.json")["lines"][0]
-        self.assertEqual("元気？ «FE»", etutane["source"])
+        self.assertEqual("元気？\n大丈夫？", etutane["source"])
+        self.assertEqual(["元気？", "大丈夫？"], etutane["source_segments"])
         self.assertEqual("花子", etutane["speaker"])
         self.assertEqual(3, etutane["metadata"]["i"])
 

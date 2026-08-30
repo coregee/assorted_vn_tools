@@ -1,18 +1,20 @@
 """
-Converts scenario ('a0') string records to editable JSON and back, wrapping the EN
+Converts scenario ('a0') dialogue pages to editable JSON and back, wrapping the EN
 translation to fit on screen.
 
 Scene text is carried by the 'S' string records of an a0 blob (see tinkerbell). Within
 a record the engine stores two bytes per glyph -- a full-width cp932 pair, or 0x00 + an
-ASCII byte for half-width -- and uses 0xFE (TERM) as the line break / record terminator.
+ASCII byte for half-width -- and uses 0xFE (TERM) as the displayed-line terminator.
+One or more consecutive string records immediately before the engine's page-advance
+command form a single dialogue/narration page.
 
 A record whose decoded text is bracketed 【...】 is a *name* record: it names the speaker
 of the line that follows, and its translation is supplied through the _names.json glossary
-rather than inline. Every other string record is one displayed line: 'dialogue' if a name
-preceded it, otherwise 'narration'.
+rather than inline. A page is 'dialogue' if a name preceded it, otherwise 'narration'.
 
-extract() emits, per a0 file, {file, lines:[{i, kind, speaker, jp, translated}, ...]};
-build() re-encodes the `translated` fields (and glossary names) back into the records.
+extract() emits, per a0 file, page records with `string_indices` and `jp_lines` preserving
+the physical source-line layout; build() reflows each translated page back into the
+required number of string records (and also rebuilds glossary names).
 
 The translation is wrapped to the line budget for its kind (narration 4, dialogue 3) by
 greedy word-wrap, then vowel/consonant-boundary hyphenation, then truncation.
@@ -26,6 +28,7 @@ import unicodedata
 from . import tinkerbell as tb
 
 TERM = 0xFE     # line break / record terminator
+PAGE_ADVANCE = b"M#NF\x00\x00\x00"
 LINE_COLS = 63  # half-width cells per row
 MAX_LINES = {"narration": 4, "dialogue": 3}
 NAMES_FILE = "_names.json"
@@ -199,6 +202,10 @@ def a0_strings(blob):
             yield si, payload, tb.decrypt_string(payload)
             si += 1
 
+def is_page_advance(payload):
+    """True for the command that displays/advances the accumulated text page."""
+    return payload == PAGE_ADVANCE
+
 def strip_term(body):
     """Split a trailing 0xFE terminator off `body`; returns (body_without_term, had_term)."""
     if body.endswith(bytes([TERM])):
@@ -211,17 +218,99 @@ def is_name(text):
 
 def load_names(names_path):
     """Load the _names.json glossary {jp_name: translation_or_None}, or {} if absent."""
-    return json.load(open(names_path, encoding="utf-8")) if os.path.exists(names_path) else {}
+    if not os.path.exists(names_path):
+        return {}
+    with open(names_path, encoding="utf-8") as stream:
+        return json.load(stream)
 
-def _merge_existing_translated(lines, prev_path):
-    """Carry over previously-saved `translated` fields from prev_path, keyed by line index."""
+def _entry_indices(entry):
+    """Return an extracted entry's physical string indices (old line JSON is supported)."""
+    indices = entry.get("string_indices")
+    if (isinstance(indices, list) and indices
+            and all(isinstance(index, int) and not isinstance(index, bool) for index in indices)):
+        return tuple(indices)
+    index = entry.get("i")
+    return (index,) if isinstance(index, int) and not isinstance(index, bool) else ()
+
+def _merge_existing_translated(pages, prev_path):
+    """Carry translations across re-extraction, including old one-record-per-line JSON."""
     if not os.path.exists(prev_path):
         return
-    prev = {ln["i"]: ln for ln in json.load(open(prev_path, encoding="utf-8")).get("lines", [])}
-    for ln in lines:
-        old = prev.get(ln["i"])
+    with open(prev_path, encoding="utf-8") as stream:
+        document = json.load(stream)
+    previous = document.get("lines", document.get("pages", []))
+    exact = {_entry_indices(entry): entry for entry in previous if _entry_indices(entry)}
+    by_index = {index: entry for entry in previous for index in _entry_indices(entry)}
+    for page in pages:
+        indices = _entry_indices(page)
+        old = exact.get(indices)
         if old and old.get("translated") is not None:
-            ln["translated"] = old["translated"]
+            page["translated"] = old["translated"]
+            continue
+        parts = [by_index.get(index) for index in indices]
+        if parts and all(part is not None and part.get("translated") is not None for part in parts):
+            page["translated"] = "\n".join(part["translated"] for part in parts)
+
+def _page_entry(items, speaker, page_number=None):
+    indices = [item[0] for item in items]
+    source_lines = [item[1] for item in items]
+    entry = {
+        "i": indices[0],
+        "string_indices": indices,
+        "kind": "dialogue" if speaker else "narration",
+        "speaker": speaker,
+        "jp": "\n".join(source_lines),
+        "jp_lines": source_lines,
+        "translated": None,
+    }
+    if page_number is not None:
+        entry["page"] = page_number
+    return entry
+
+def extract_pages(blob, names):
+    """Return page-level text entries and update `names` with encountered speakers.
+
+    The text renderer accumulates a consecutive run of S records and displays it when
+    `PAGE_ADVANCE` follows. Other strings (menus/config labels) remain independent so
+    unrelated UI records are never merged merely because they share a script file.
+    """
+    pages = []
+    run = []
+    pending_speaker = None
+    string_index = 0
+    page_number = 0
+
+    def flush(as_page=False):
+        nonlocal run, pending_speaker, page_number
+        if not run:
+            return
+        if as_page:
+            page_number += 1
+            pages.append(_page_entry(run, pending_speaker, page_number))
+        else:
+            for position, item in enumerate(run):
+                pages.append(_page_entry([item], pending_speaker if position == 0 else None))
+        run = []
+        pending_speaker = None
+
+    for _off, payload in tb.parse_records(blob):
+        if tb.is_string_record(payload):
+            body, _had_term = strip_term(tb.decrypt_string(payload))
+            text = tb.body_to_text(body)
+            if is_name(text):
+                flush()
+                names.setdefault(text, None)
+                pending_speaker = text[1:-1]
+            else:
+                run.append((string_index, text))
+            string_index += 1
+            continue
+        if is_page_advance(payload):
+            flush(as_page=True)
+        elif run:
+            flush()
+    flush()
+    return pages
 
 def extract(orig_dir, json_dir, names_path, force=False):
     """Decode every a0 blob in `orig_dir` to <name>.json under `json_dir`, collecting
@@ -232,36 +321,28 @@ def extract(orig_dir, json_dir, names_path, force=False):
     files = sorted(glob.glob(os.path.join(orig_dir, "*.a0")))
     if not files:
         raise SystemExit("!! no %s\\*.a0 -- run extract with flag first" % os.path.basename(orig_dir))
-    total_lines = total_names = 0
+    total_pages = total_source_lines = 0
     for f in files:
-        blob = open(f, "rb").read()
-        lines = []
-        pending_speaker = None
-        for si, payload, body in a0_strings(blob):
-            jp = tb.body_to_text(strip_term(body)[0])
-            if is_name(jp):
-                names.setdefault(jp, None)
-                pending_speaker = jp[1:-1]
-                total_names += 1
-                continue
-            speaker = pending_speaker
-            pending_speaker = None
-            kind = "dialogue" if speaker else "narration"
-            lines.append({"i": si, "kind": kind, "speaker": speaker, "jp": jp, "translated": None})
+        with open(f, "rb") as stream:
+            blob = stream.read()
+        pages = extract_pages(blob, names)
         out_path = os.path.join(json_dir, os.path.splitext(os.path.basename(f))[0] + ".json")
         if not force:
-            _merge_existing_translated(lines, out_path)
-        total_lines += len(lines)
-        json.dump({"file": os.path.basename(f), "lines": lines},
-                  open(out_path, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
-    json.dump(names, open(names_path, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
-    print("  %d scripts, %d text lines (%d 【name】 records -> glossary), %d distinct speakers"
-          % (len(files), total_lines, total_names, len(names)))
+            _merge_existing_translated(pages, out_path)
+        total_pages += len(pages)
+        total_source_lines += sum(len(page["string_indices"]) for page in pages)
+        with open(out_path, "w", encoding="utf-8") as stream:
+            json.dump({"file": os.path.basename(f), "lines": pages}, stream,
+                      ensure_ascii=False, indent=1)
+    with open(names_path, "w", encoding="utf-8") as stream:
+        json.dump(names, stream, ensure_ascii=False, indent=1)
+    print("  %d scripts, %d dialogue pages from %d source lines, %d distinct speakers"
+          % (len(files), total_pages, total_source_lines, len(names)))
 
 def build(json_dir, orig_dir, out_dir, names_path, cols=LINE_COLS):
-    """Re-encode the `translated` lines (and glossary names) from `json_dir` back into the
-    a0 blobs from `orig_dir`, writing patched copies to `out_dir`. Each line is wrapped to
-    `cols`; overflow and non-SJIS encoding problems are reported, not fatal."""
+    """Re-encode translated pages (and glossary names) from `json_dir` back into the
+    a0 blobs from `orig_dir`, writing patched copies to `out_dir`. Each page is wrapped
+    to `cols`; overflow and non-SJIS encoding problems are reported, not fatal."""
     os.makedirs(out_dir, exist_ok=True)
     names = load_names(names_path)
     names_active = any(v for v in names.values())
@@ -272,21 +353,67 @@ def build(json_dir, orig_dir, out_dir, names_path, cols=LINE_COLS):
     changed = 0
     errors, warns = [], []
     for jf in jfiles:
-        spec = json.load(open(jf, encoding="utf-8"))
+        with open(jf, encoding="utf-8") as stream:
+            spec = json.load(stream)
         a0name = spec["file"]
-        orig = open(os.path.join(orig_dir, a0name), "rb").read()
-        tmap = {ln["i"]: (ln["translated"], ln.get("kind", "narration"))
-                for ln in spec["lines"] if ln.get("translated")}
-        if not tmap and not names_active:
-            open(os.path.join(out_dir, a0name), "wb").write(orig)
+        with open(os.path.join(orig_dir, a0name), "rb") as stream:
+            orig = stream.read()
+        entries = spec.get("lines", spec.get("pages", []))
+        translated_entries = [entry for entry in entries
+                              if entry.get("translated") and _entry_indices(entry)]
+        if not translated_entries and not names_active:
+            with open(os.path.join(out_dir, a0name), "wb") as stream:
+                stream.write(orig)
             continue
+        original_terms = {}
+        for si, _payload, body in a0_strings(orig):
+            _text, original_terms[si] = strip_term(body)
+        replacements = {}
+        extras_after = {}
+        claimed = set()
+        for entry in translated_entries:
+            indices = _entry_indices(entry)
+            overlap = claimed.intersection(indices)
+            if overlap:
+                errors.append("%s: overlapping string indices %s" %
+                              (a0name, ", ".join(str(index) for index in sorted(overlap))))
+                continue
+            if any(index not in original_terms for index in indices):
+                errors.append("%s: unknown string index in %r" % (a0name, indices))
+                continue
+            claimed.update(indices)
+            budget = MAX_LINES.get(entry.get("kind", "narration"), MAX_LINES["narration"])
+            wrapped, dropped = wrap_page(entry["translated"], cols, budget)
+            if not wrapped:
+                wrapped = [""]
+            if dropped:
+                warns.append("%s#%d (%s): >%d lines -> truncated; dropped: %r"
+                             % (a0name, indices[0], entry.get("kind", "narration"),
+                                budget, dropped))
+            try:
+                for position, index in enumerate(indices):
+                    replacements[index] = (tb.encrypt_string(
+                        _encode_line(wrapped[position], original_terms[index]))
+                                           if position < len(wrapped) else None)
+                if len(wrapped) > len(indices):
+                    extras_after[indices[-1]] = [tb.encrypt_string(
+                        _encode_line(line, original_terms[indices[-1]]))
+                                                 for line in wrapped[len(indices):]]
+            except UnicodeEncodeError as ex:
+                for index in indices:
+                    replacements.pop(index, None)
+                extras_after.pop(indices[-1], None)
+                errors.append("%s#%d: non-SJIS char in translated page: %s" %
+                              (a0name, indices[0], ex))
         out = bytearray()
         si = 0
         orig_end = 0
         file_changed = False
         for off, payload in tb.parse_records(orig):
             orig_end = off + 4 + len(payload)
+            processed_string_index = None
             if tb.is_string_record(payload):
+                processed_string_index = si
                 body = tb.decrypt_string(payload)
                 _t, had_term = strip_term(body)
                 jp = tb.body_to_text(_t)
@@ -299,23 +426,17 @@ def build(json_dir, orig_dir, out_dir, names_path, cols=LINE_COLS):
                         except UnicodeEncodeError as ex:
                             errors.append("%s#%d: non-SJIS char in name: %s" % (a0name, si, ex))
                 else:
-                    entry = tmap.get(si)
-                    if entry:
-                        en_text, kind = entry
-                        budget = MAX_LINES.get(kind, MAX_LINES["narration"])
-                        lines, dropped = wrap_page(en_text, cols, budget)
-                        if dropped:
-                            warns.append("%s#%d (%s): >%d lines -> truncated; dropped: %r"
-                                         % (a0name, si, kind, budget, dropped))
-                        try:
-                            payload = tb.encrypt_string(_encode_line("\n".join(lines), had_term))
-                            file_changed = True
-                        except UnicodeEncodeError as ex:
-                            errors.append("%s#%d: non-SJIS char in translated: %s" % (a0name, si, ex))
+                    if si in replacements:
+                        payload = replacements[si]
+                        file_changed = True
                 si += 1
-            out += struct.pack("<I", len(payload)) + payload
+            if payload is not None:
+                out += struct.pack("<I", len(payload)) + payload
+            for extra in extras_after.get(processed_string_index, ()):
+                out += struct.pack("<I", len(extra)) + extra
         out += orig[orig_end:]
-        open(os.path.join(out_dir, a0name), "wb").write(bytes(out))
+        with open(os.path.join(out_dir, a0name), "wb") as stream:
+            stream.write(bytes(out))
         if file_changed:
             changed += 1
     print("  built %d scripts (%d with translations)" % (len(jfiles), changed))

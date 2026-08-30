@@ -161,7 +161,7 @@ def _line_binding(entry: Any, pointer: str, schema_hint: str) -> Optional[_Bindi
         protected = True
     source = entry[source_key]
     source_segments = [source]
-    if schema_hint == "sstar" and isinstance(entry.get("jp_lines"), list):
+    if isinstance(entry.get("jp_lines"), list):
         candidate_segments = entry["jp_lines"]
         if candidate_segments and all(isinstance(segment, str) for segment in candidate_segments):
             source_segments = list(candidate_segments)
@@ -170,7 +170,7 @@ def _line_binding(entry: Any, pointer: str, schema_hint: str) -> Optional[_Bindi
     empty_is_applied = schema_hint in ("dasaku", "dasaku-ui", "generic")
 
     omitted = {source_key, translation_key, "speaker", "name", "speaker_tr",
-               "name_translated", "kind", "context"}
+               "name_translated", "kind", "context", "jp_lines"}
     metadata = {key: value for key, value in entry.items() if key not in omitted}
     return _Binding(pointer, entry, source_key, translation_key, source, translation,
                     speaker, speaker_translation, kind, translatable, context, metadata, source_segments,
