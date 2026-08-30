@@ -20,8 +20,12 @@ LM Studio's default OpenAI-compatible base URL is
 From this repository's root:
 
 ```powershell
-python -m llm_translation_tools --game "C:\Games\My Visual Novel"
+python -m llm_translation_tools
 ```
+
+Choose the game folder from the editor's welcome screen or the sidebar. The
+button opens the operating system's native folder picker; typing a path remains
+available as a fallback.
 
 The folder may be either:
 
@@ -32,8 +36,8 @@ The second form is useful for Dasaku when `extract.py -p ...` points at an
 external game, because that tool keeps its editable corpus beside the tool.
 
 The editor opens at `http://127.0.0.1:8765/`. Use `--no-browser` to suppress
-automatic browser opening, `--port 0` to select a free port, or omit `--game`
-and enter a folder path in the interface.
+automatic browser opening, `--port 0` to select a free port, or `--game` to
+open a known folder immediately at launch.
 
 ## Workflow
 

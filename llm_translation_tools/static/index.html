@@ -47,9 +47,10 @@
         <label for="project-path">Extracted game folder</label>
         <div class="input-action">
           <input id="project-path" name="path" type="text" autocomplete="off" spellcheck="false" placeholder="C:\Games\Example\scripts" required>
+          <button class="button button-secondary" id="browse-project-button" type="button">Browse…</button>
           <button class="button button-primary" id="open-project-button" type="submit">Open</button>
         </div>
-        <p class="field-help">Enter a game folder containing <code>script/</code>, or the extracted <code>script</code> folder itself.</p>
+        <p class="field-help">Choose a game folder containing <code>script/</code>, or the extracted <code>script</code> folder itself.</p>
       </form>
 
       <section class="project-summary" id="project-summary" aria-label="Project summary" hidden>
@@ -104,7 +105,7 @@
         </div>
         <h1>Open an extracted game folder</h1>
         <p>Translate extracted JSON script lines with your local LM Studio model, or edit target fields by hand.</p>
-        <button class="button button-primary" id="focus-path-button" type="button">Choose a folder path</button>
+        <button class="button button-primary" id="choose-folder-button" type="button">Choose a folder</button>
       </div>
 
       <div class="editor" id="editor" hidden>

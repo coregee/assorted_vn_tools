@@ -159,6 +159,27 @@ class ServerIntegrationTests(unittest.TestCase):
         self.assertEqual(409, stale_status)
         self.assertIn("changed on disk", stale["error"]["message"])
 
+    def test_native_folder_picker_returns_selection_and_cancel(self):
+        picker = mock.Mock(return_value=str(self.root))
+        self.state.folder_picker = picker
+        status, selected, _headers = self.request(
+            "/api/project/pick",
+            "POST",
+            {"initial_path": str(self.temporary.name)},
+        )
+        self.assertEqual(200, status)
+        self.assertEqual(str(self.root), selected["path"])
+        picker.assert_called_once_with(str(self.temporary.name))
+
+        self.state.folder_picker = mock.Mock(return_value=None)
+        cancelled = self.request("/api/project/pick", "POST", {})[1]
+        self.assertIsNone(cancelled["path"])
+
+        status, payload = self.error(
+            "/api/project/pick", "POST", {"initial_path": 123})
+        self.assertEqual(400, status)
+        self.assertIn("must be a string", payload["error"]["message"])
+
     def test_security_rejects_traversal_cross_origin_and_remote_lm(self):
         self.open_project()
         status, _payload = self.error(

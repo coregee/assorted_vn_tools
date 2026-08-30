@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Sequence
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from .lmstudio import DEFAULT_BASE_URL, LMStudioClient, LMStudioError, validate_base_url
@@ -56,6 +56,56 @@ def _is_loopback_host(host: Optional[str]) -> bool:
         return ipaddress.ip_address(host).is_loopback
     except ValueError:
         return False
+
+
+def _pick_directory(initial_path: Optional[str] = None) -> Optional[str]:
+    """Show the operating system directory picker for the local browser client."""
+    try:
+        import tkinter
+        from tkinter import filedialog
+    except ImportError as exc:
+        raise APIError(
+            503, "the native folder picker is unavailable; enter the folder path manually") from exc
+
+    root = None
+    try:
+        root = tkinter.Tk()
+        root.withdraw()
+        try:
+            root.attributes("-topmost", True)
+        except tkinter.TclError:
+            pass
+
+        options: Dict[str, Any] = {
+            "parent": root,
+            "title": "Open extracted game folder",
+            "mustexist": True,
+        }
+        if initial_path:
+            try:
+                candidate = Path(initial_path).expanduser()
+                if not candidate.is_absolute():
+                    candidate = Path.cwd() / candidate
+                if candidate.is_dir():
+                    options["initialdir"] = str(candidate.resolve())
+                elif candidate.parent.is_dir():
+                    options["initialdir"] = str(candidate.parent.resolve())
+            except (OSError, RuntimeError, ValueError):
+                pass
+
+        selected = filedialog.askdirectory(**options)
+        if not selected:
+            return None
+        return str(Path(selected).resolve(strict=True))
+    except (OSError, RuntimeError, tkinter.TclError) as exc:
+        raise APIError(
+            503, "the native folder picker could not be opened; enter the folder path manually") from exc
+    finally:
+        if root is not None:
+            try:
+                root.destroy()
+            except tkinter.TclError:
+                pass
 
 
 class APIError(Exception):
@@ -305,11 +355,13 @@ class JobManager:
 
 class AppState:
     def __init__(self, base_dir: Optional[Path] = None,
-                 static_dir: Optional[Path] = None):
+                 static_dir: Optional[Path] = None,
+                 folder_picker: Optional[Callable[[Optional[str]], Optional[str]]] = None):
         self.projects = ProjectStore(base_dir)
         self.settings = SettingsStore()
         self.jobs = JobManager()
         self.static_dir = (static_dir or Path(__file__).with_name("static")).resolve()
+        self.folder_picker = folder_picker or _pick_directory
 
 
 class TranslationHTTPServer(ThreadingHTTPServer):
@@ -422,6 +474,19 @@ class RequestHandler(BaseHTTPRequestHandler):
                 "project": description,
                 "files": description.get("files", []) if description else [],
             })
+            return
+        if self.command == "POST" and path == "/api/project/pick":
+            body = self._read_json()
+            if not isinstance(body, Mapping):
+                raise APIError(400, "request body must be an object")
+            unknown = set(body) - {"initial_path"}
+            if unknown:
+                raise APIError(400, "unknown folder-picker fields: %s" %
+                               ", ".join(sorted(unknown)))
+            initial_path = body.get("initial_path")
+            if initial_path is not None and not isinstance(initial_path, str):
+                raise APIError(400, "initial_path must be a string")
+            self._send_json(200, {"path": self.state.folder_picker(initial_path or None)})
             return
         if self.command == "POST" and path == "/api/project/open":
             body = self._read_json()

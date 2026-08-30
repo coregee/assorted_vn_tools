@@ -73,6 +73,13 @@
       return this.request(ENDPOINTS.project + "/open", { method: "POST", body: { path } });
     },
 
+    pickProjectFolder(initialPath) {
+      return this.request(ENDPOINTS.project + "/pick", {
+        method: "POST",
+        body: { initial_path: initialPath || null },
+      });
+    },
+
     getProject() {
       return this.request(ENDPOINTS.project);
     },
@@ -162,10 +169,10 @@
 
   const elementIds = [
     "connection-dot", "project-label", "error-banner", "error-title", "error-message", "dismiss-error",
-    "open-project-form", "project-path", "open-project-button", "project-summary", "project-path-label",
+    "open-project-form", "project-path", "browse-project-button", "open-project-button", "project-summary", "project-path-label",
     "stat-files", "stat-lines", "stat-translated", "project-progress", "completion-label", "file-browser",
     "file-filter", "file-count", "file-list", "no-files", "selected-file-count", "select-all-files",
-    "select-no-files", "translate-files", "welcome-state", "focus-path-button", "editor",
+    "select-no-files", "translate-files", "welcome-state", "choose-folder-button", "editor",
     "active-file-name", "active-file-path", "save-state", "save-button", "selection-count", "select-untranslated",
     "select-all", "select-none", "translate-selected", "translate-untranslated", "translate-file",
     "line-filter", "visible-line-count", "job-panel", "job-title", "job-message", "job-progressbar", "job-progress",
@@ -502,18 +509,17 @@
     return window.confirm(`You have ${dirtyCount} unsaved edit${dirtyCount === 1 ? "" : "s"}. Discard them and ${action}?`);
   }
 
-  async function handleOpenProject(event) {
-    event.preventDefault();
-    clearError();
-    const path = $("project-path").value.trim();
-    if (!path) return;
+  function canOpenAnotherProject() {
     if (state.saving) return;
-    if (!confirmCanLeave("open another folder")) return;
     if (state.job) {
       showError("Cancel the active translation job before opening another project.", "Translation in progress");
-      return;
+      return false;
     }
+    return confirmCanLeave("open another folder");
+  }
 
+  async function openProjectPath(path) {
+    clearError();
     setButtonBusy($("open-project-button"), true, "Opening…");
     setStatus("Opening project…");
     try {
@@ -529,6 +535,41 @@
       setStatus("Folder could not be opened");
     } finally {
       setButtonBusy($("open-project-button"), false);
+    }
+  }
+
+  async function handleOpenProject(event) {
+    event.preventDefault();
+    const path = $("project-path").value.trim();
+    if (!path || !canOpenAnotherProject()) return;
+    await openProjectPath(path);
+  }
+
+  async function browseForProject(trigger) {
+    if (!canOpenAnotherProject()) return;
+    clearError();
+    const controls = [$("project-path"), $("browse-project-button"), $("open-project-button"), $("choose-folder-button")];
+    controls.forEach((control) => { control.disabled = true; });
+    const originalLabel = trigger.textContent;
+    trigger.textContent = "Choosing…";
+    trigger.setAttribute("aria-busy", "true");
+    setStatus("Waiting for folder selection…");
+    try {
+      const selection = await api.pickProjectFolder($("project-path").value.trim());
+      const path = typeof selection?.path === "string" ? selection.path.trim() : "";
+      if (!path) {
+        setStatus("Folder selection cancelled");
+        return;
+      }
+      $("project-path").value = path;
+      await openProjectPath(path);
+    } catch (error) {
+      showError(error, "Could not choose folder");
+      setStatus("Folder picker unavailable");
+    } finally {
+      trigger.textContent = originalLabel;
+      trigger.removeAttribute("aria-busy");
+      controls.forEach((control) => { control.disabled = state.saving; });
     }
   }
 
@@ -809,7 +850,9 @@
   function setSavingState(saving) {
     state.saving = saving;
     $("project-path").disabled = saving;
+    $("browse-project-button").disabled = saving;
     $("open-project-button").disabled = saving;
+    $("choose-folder-button").disabled = saving;
     $("file-list").querySelectorAll(".file-item").forEach((button) => { button.disabled = saving; });
     $("line-list").querySelectorAll(".line-select").forEach((input) => {
       const line = findLine(input.dataset.lineKey);
@@ -1271,7 +1314,8 @@
 
   function bindEvents() {
     $("open-project-form").addEventListener("submit", handleOpenProject);
-    $("focus-path-button").addEventListener("click", () => $("project-path").focus());
+    $("browse-project-button").addEventListener("click", (event) => browseForProject(event.currentTarget));
+    $("choose-folder-button").addEventListener("click", (event) => browseForProject(event.currentTarget));
     $("dismiss-error").addEventListener("click", clearError);
     $("save-button").addEventListener("click", () => saveActiveFile());
     $("settings-button").addEventListener("click", openSettings);
