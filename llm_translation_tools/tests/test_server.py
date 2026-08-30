@@ -21,7 +21,7 @@ class FakeLMStudioClient:
         return [{"id": "fixture-model", "owned_by": "local"}]
 
     def chat_completion(self, messages, model, temperature, max_tokens,
-                        response_format=None):
+                        response_format=None, reasoning_effort=None):
         prompt = messages[-1]["content"]
         encoded_ids = re.findall(r"<<<TARGET (\"(?:\\.|[^\"])*\")>>>", prompt)
         line_ids = [json.loads(value) for value in encoded_ids]
@@ -47,7 +47,7 @@ class BlockingSecondTurnClient(FakeLMStudioClient):
         cls.release_second.clear()
 
     def chat_completion(self, messages, model, temperature, max_tokens,
-                        response_format=None):
+                        response_format=None, reasoning_effort=None):
         with self.lock:
             type(self).calls += 1
             call_number = type(self).calls
@@ -55,7 +55,8 @@ class BlockingSecondTurnClient(FakeLMStudioClient):
             self.second_started.set()
             self.release_second.wait(timeout=5)
         return super().chat_completion(
-            messages, model, temperature, max_tokens, response_format)
+            messages, model, temperature, max_tokens, response_format,
+            reasoning_effort)
 
 
 class ServerIntegrationTests(unittest.TestCase):
@@ -322,12 +323,22 @@ class ServerIntegrationTests(unittest.TestCase):
                 "batch_limit": 200,
                 "context_window": 65536,
                 "response_reserve_percent": 15,
+                "enable_thinking": False,
             },
         )
         self.assertEqual("characters", settings["batch_mode"])
         self.assertEqual(200, settings["batch_limit"])
         self.assertEqual(65536, settings["context_window"])
         self.assertEqual(15, settings["response_reserve_percent"])
+        self.assertFalse(settings["enable_thinking"])
+
+        status, payload = self.error(
+            "/api/settings",
+            "PUT",
+            {"enable_thinking": "no"},
+        )
+        self.assertEqual(400, status)
+        self.assertIn("must be a boolean", payload["error"]["message"])
 
         status, payload = self.error(
             "/api/settings",

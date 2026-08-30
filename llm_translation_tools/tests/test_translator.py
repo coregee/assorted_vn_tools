@@ -12,6 +12,7 @@ from llm_translation_tools.translator import (
 
 SETTINGS = {
     "model": "local-model",
+    "enable_thinking": True,
     "system_prompt": "Translate into {target_language}. Keep continuity.",
     "game_context": "A mystery. Hana is formal and Taro is terse.",
     "target_language": "English",
@@ -46,13 +47,14 @@ class RecordingClient:
         self.calls = []
 
     def chat_completion(self, messages, model, temperature, max_tokens,
-                        response_format=None):
+                        response_format=None, reasoning_effort=None):
         self.calls.append({
             "messages": copy.deepcopy(list(messages)),
             "model": model,
             "temperature": temperature,
             "max_tokens": max_tokens,
             "response_format": copy.deepcopy(response_format),
+            "reasoning_effort": reasoning_effort,
         })
         response = self.responses.pop(0)
         if isinstance(response, Exception):
@@ -198,6 +200,18 @@ class TranslationCycleTests(unittest.TestCase):
         self.assertNotIn("<<<REFERENCE", client.calls[1]["messages"][-1]["content"])
         self.assertEqual(2048, client.calls[0]["max_tokens"])
         self.assertIsNotNone(client.calls[0]["response_format"])
+        self.assertEqual("medium", client.calls[0]["reasoning_effort"])
+
+    def test_thinking_can_be_disabled_for_model_requests(self):
+        target = line("script/a.json", 0, "こんにちは")
+        client = RecordingClient([response_for(target["id"], "Hello.")])
+
+        TranslationEngine(client).translate(
+            [{"path": "script/a.json", "lines": [target]}],
+            {**SETTINGS, "enable_thinking": False},
+        )
+
+        self.assertEqual("none", client.calls[0]["reasoning_effort"])
 
     def test_first_turn_for_a_late_target_contains_all_past_lines_but_no_future(self):
         path = "script/a.json"

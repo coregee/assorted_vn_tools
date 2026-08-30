@@ -50,7 +50,8 @@ open a known folder immediately at launch.
    (or leave it on auto-detect) and use **Extract scripts**. The workbench runs
    the repository's existing tool against the selected game folder and opens
    the resulting script corpus when it succeeds.
-4. Open **Settings**, load the model list, and select a model.
+4. Open **Settings**, load the model list, select a model, and choose whether
+   that model should use thinking/reasoning for translation requests.
 5. Describe the game, characters, tone, terminology, and naming rules in
    **Game context**. Customize the system prompt if needed.
 6. Open a JSON file and choose **Translate untranslated**, select individual
@@ -106,6 +107,11 @@ model-independent.
 Set **Context window** to the context length configured for the loaded LM Studio
 model. For a good result, keep related event lines in their native file and
 write specific game context before translating.
+
+The **Enable thinking** setting is stored with the selected model settings. It
+sends LM Studio `reasoning_effort: "medium"` when enabled and `"none"` when
+disabled. Models whose chat template does not expose controllable reasoning may
+ignore the setting.
 
 Use **Save as default** in the settings dialog to apply the current form to the
 open project and use it as the starting configuration for future projects. User

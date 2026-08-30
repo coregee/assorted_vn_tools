@@ -22,7 +22,7 @@ from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Optional,
 # every existing repacker globs JSON files and would try to ingest application config.
 PROJECT_SETTINGS_FILE = ".llm_translation_tools.settings"
 PROJECT_SETTING_KEYS = frozenset(
-    ("system_prompt", "game_context", "target_language", "model", "temperature",
+    ("system_prompt", "game_context", "target_language", "model", "enable_thinking", "temperature",
      "context_window", "response_reserve_percent", "batch_mode", "batch_limit")
 )
 

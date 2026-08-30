@@ -344,17 +344,21 @@ class TranslationEngine:
 
     def _complete(self, messages: Sequence[Mapping[str, str]], model: str,
                   temperature: float, max_tokens: int,
-                  structured_supported: bool) -> Tuple[str, bool]:
+                  structured_supported: bool,
+                  enable_thinking: bool) -> Tuple[str, bool]:
         response_format = TRANSLATIONS_RESPONSE_FORMAT if structured_supported else None
+        reasoning_effort = "medium" if enable_thinking else "none"
         try:
             return self.client.chat_completion(
-                messages, model, temperature, max_tokens, response_format), structured_supported
+                messages, model, temperature, max_tokens, response_format,
+                reasoning_effort=reasoning_effort), structured_supported
         except LMStudioError as exc:
             # Some loaded models/LM Studio versions reject response_format. Retry the same
             # first request without it; parsing remains strict below.
             if structured_supported and exc.status in (400, 404, 415, 422):
                 return self.client.chat_completion(
-                    messages, model, temperature, max_tokens, None), False
+                    messages, model, temperature, max_tokens, None,
+                    reasoning_effort=reasoning_effort), False
             raise
 
     def translate(self, files: Sequence[Mapping[str, Any]], settings: Mapping[str, Any],
@@ -416,7 +420,8 @@ class TranslationEngine:
                     raw, structured_supported = self._complete(
                         attempt_messages, settings["model"],
                         float(settings["temperature"]), max_tokens,
-                        structured_supported)
+                        structured_supported,
+                        bool(settings.get("enable_thinking", True)))
                 except LMStudioError as error:
                     if attempt >= TURN_RETRY_COUNT or not _retryable_lmstudio_error(error):
                         if attempt:

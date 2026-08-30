@@ -51,6 +51,7 @@ def _default_settings_path() -> Path:
 DEFAULT_SETTINGS: Dict[str, Any] = {
     "base_url": DEFAULT_BASE_URL,
     "model": "",
+    "enable_thinking": True,
     "system_prompt": DEFAULT_SYSTEM_PROMPT,
     "game_context": "",
     "target_language": "English",
@@ -177,6 +178,8 @@ class SettingsStore:
             raise APIError(400, "prompt or game context is too large")
         if not isinstance(result.get("allow_remote_lmstudio"), bool):
             raise APIError(400, "allow_remote_lmstudio must be a boolean")
+        if not isinstance(result.get("enable_thinking"), bool):
+            raise APIError(400, "enable_thinking must be a boolean")
         temperature = result.get("temperature")
         if isinstance(temperature, bool) or not isinstance(temperature, (int, float)):
             raise APIError(400, "temperature must be a number")

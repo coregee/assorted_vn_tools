@@ -161,6 +161,7 @@
   const DEFAULT_SETTINGS = Object.freeze({
     base_url: "http://127.0.0.1:1234/v1",
     model: "",
+    enable_thinking: true,
     system_prompt: "",
     game_context: "",
     target_language: "English",
@@ -208,7 +209,7 @@
     "cancel-job", "line-list", "empty-lines", "app-status", "settings-button", "settings-dialog",
     "settings-form", "setting-base-url", "setting-model", "models-list", "models-status", "setting-target-language",
     "setting-batch-mode", "setting-batch-limit", "setting-context-window", "setting-response-reserve", "setting-temperature",
-    "setting-allow-remote", "setting-game-context", "setting-system-prompt", "load-models", "settings-status",
+    "setting-enable-thinking", "setting-allow-remote", "setting-game-context", "setting-system-prompt", "load-models", "settings-status",
     "save-default-settings", "save-settings", "shortcuts-button", "shortcuts-dialog",
   ];
 
@@ -1034,6 +1035,7 @@
     return {
       base_url: $("setting-base-url").value.trim(),
       model: $("setting-model").value.trim(),
+      enable_thinking: $("setting-enable-thinking").checked,
       system_prompt: $("setting-system-prompt").value,
       game_context: $("setting-game-context").value,
       target_language: $("setting-target-language").value.trim(),
@@ -1054,6 +1056,7 @@
   function applySettingsForm(settings = state.settings) {
     $("setting-base-url").value = settings.base_url ?? DEFAULT_SETTINGS.base_url;
     $("setting-model").value = settings.model ?? "";
+    $("setting-enable-thinking").checked = Boolean(settings.enable_thinking);
     $("setting-system-prompt").value = settings.system_prompt ?? "";
     $("setting-game-context").value = settings.game_context ?? "";
     $("setting-target-language").value = settings.target_language ?? DEFAULT_SETTINGS.target_language;
@@ -1179,6 +1182,7 @@
       files: filePaths,
       base_url: settings.base_url,
       model: settings.model,
+      enable_thinking: settings.enable_thinking,
       system_prompt: settings.system_prompt,
       game_context: settings.game_context,
       target_language: settings.target_language,

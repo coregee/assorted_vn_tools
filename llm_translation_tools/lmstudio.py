@@ -124,7 +124,8 @@ class LMStudioClient:
 
     def chat_completion(self, messages: Sequence[Mapping[str, str]], model: str,
                         temperature: float = 0.2, max_tokens: int = 4096,
-                        response_format: Optional[Mapping[str, Any]] = None) -> str:
+                        response_format: Optional[Mapping[str, Any]] = None,
+                        reasoning_effort: Optional[str] = None) -> str:
         if not isinstance(model, str) or not model.strip():
             raise LMStudioError("select a loaded LM Studio model first")
         payload: Dict[str, Any] = {
@@ -136,6 +137,8 @@ class LMStudioClient:
         }
         if response_format is not None:
             payload["response_format"] = response_format
+        if reasoning_effort is not None:
+            payload["reasoning_effort"] = reasoning_effort
         response = self._request("POST", "/chat/completions", payload)
         try:
             content = response["choices"][0]["message"]["content"]
@@ -144,4 +147,3 @@ class LMStudioClient:
         if not isinstance(content, str):
             raise LMStudioError("LM Studio chat response content is not text")
         return content
-
