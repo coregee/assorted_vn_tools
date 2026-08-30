@@ -183,6 +183,11 @@ def _glossary_aliases(source: str) -> List[str]:
     return aliases
 
 
+def _source_for_prompt(source: str) -> str:
+    """Remove visual line wrapping from Japanese source text sent to the model."""
+    return re.sub(r"[\r\n\u2028\u2029]", "", source)
+
+
 def speaker_glossary(files: Sequence[Mapping[str, Any]]) -> Dict[str, str]:
     glossary: Dict[str, str] = {}
     for file_data in files:
@@ -203,7 +208,7 @@ def _display_line(line: Mapping[str, Any], role: str,
                   glossary: Optional[Mapping[str, str]] = None) -> str:
     parts = ["<<<%s %s>>>" % (role, json.dumps(line["id"], ensure_ascii=False))]
     if line.get("speaker"):
-        parts.append("SPEAKER: " + line["speaker"])
+        parts.append("SPEAKER: " + _source_for_prompt(line["speaker"]))
         translated_speaker = line.get("speaker_translation") or (glossary or {}).get(line["speaker"])
         if translated_speaker:
             parts.append("SPEAKER TRANSLATION: " + translated_speaker)
@@ -211,11 +216,9 @@ def _display_line(line: Mapping[str, Any], role: str,
         parts.append("KIND: " + line["kind"])
     segments = line.get("source_segments")
     if isinstance(segments, list) and len(segments) > 1 and all(isinstance(s, str) for s in segments):
-        parts.append("SOURCE SEGMENTS (chronological on-screen lines):")
-        parts.extend("  %d. %s" % (number, segment)
-                     for number, segment in enumerate(segments, 1))
+        parts.append("SOURCE: " + "".join(_source_for_prompt(segment) for segment in segments))
     else:
-        parts.append("SOURCE: " + line["source"])
+        parts.append("SOURCE: " + _source_for_prompt(line["source"]))
     existing = suggested.get(line["id"], line.get("translation"))
     if existing is not None:
         parts.append("CURRENT TRANSLATION: " + existing)

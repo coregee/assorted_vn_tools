@@ -191,7 +191,7 @@ class TranslationCycleTests(unittest.TestCase):
         self.assertIn("Hana is formal", client.calls[0]["messages"][0]["content"])
         self.assertIn("SPEAKER TRANSLATION: Hana", client.calls[0]["messages"][-1]["content"])
         self.assertIn(
-            "SOURCE SEGMENTS (chronological on-screen lines):\n  1. おは\n  2. よう",
+            "SOURCE: おはよう",
             client.calls[0]["messages"][-1]["content"],
         )
         self.assertNotIn("まだ眠い", client.calls[0]["messages"][-1]["content"])
@@ -201,6 +201,20 @@ class TranslationCycleTests(unittest.TestCase):
         self.assertEqual(2048, client.calls[0]["max_tokens"])
         self.assertIsNotNone(client.calls[0]["response_format"])
         self.assertEqual("medium", client.calls[0]["reasoning_effort"])
+
+    def test_removes_japanese_line_breaks_from_source_sent_to_model(self):
+        path = "script/a.json"
+        target = line(path, 0, "最初の行\r\n次の行\u2028最後の行")
+        client = RecordingClient([response_for(target["id"], "The complete line.")])
+
+        TranslationEngine(client).translate(
+            [{"path": path, "lines": [target]}], SETTINGS
+        )
+
+        prompt = client.calls[0]["messages"][-1]["content"]
+        self.assertIn("SOURCE: 最初の行次の行最後の行", prompt)
+        self.assertNotIn("最初の行\r\n次の行", prompt)
+        self.assertEqual("最初の行\r\n次の行\u2028最後の行", target["source"])
 
     def test_thinking_can_be_disabled_for_model_requests(self):
         target = line("script/a.json", 0, "こんにちは")

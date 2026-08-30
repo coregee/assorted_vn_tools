@@ -81,8 +81,9 @@ job progress advances. Within a file, translation runs in chronological
 conversation turns using:
 
 For Etutane, one message is an actual displayed dialogue/narration page. Its
-physical Japanese rows are supplied together as source segments, so the model
-translates the page as a coherent unit rather than translating each row alone.
+physical Japanese rows are joined without line breaks before being sent to the
+model, so visual wrapping does not distract from translating the page as one
+coherent unit.
 
 1. an editable system prompt, target language, and game-level context;
 2. every earlier line in the file, in native order, including existing
@@ -90,7 +91,7 @@ translates the page as a coherent unit rather than translating each row alone.
 3. one or more stable, delimited target IDs in native script order;
 4. the continuing user/assistant conversation from earlier lines in the same
    event file;
-5. translated speaker-glossary context and original on-screen row boundaries;
+5. translated speaker-glossary context, with Japanese source line breaks removed;
 6. a strict JSON response schema, exact ID/order validation, engine-token
    preservation, and up to three retries for malformed/incomplete output or
    transient LM Studio request failures.
