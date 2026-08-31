@@ -77,8 +77,11 @@ operations documented by the individual toolsets.
 The model is not given isolated lines. Files are processed sequentially, and
 every successful request turn is written to the native target fields before
 the next request begins. The editor reloads those committed translations as
-job progress advances. Within a file, translation runs in chronological
-conversation turns using:
+job progress advances. LM Studio's stateful `/v1/responses` endpoint stores the
+active conversation, so after the first request each normal request sends only
+the new user turn with `previous_response_id`. The complete local transcript is
+still retained for validation, recovery, and context trimming. Within a file,
+translation runs in chronological conversation turns using:
 
 For Etutane, one message is an actual displayed dialogue/narration page. Its
 physical Japanese rows are joined without line breaks before being sent to the
@@ -96,6 +99,11 @@ coherent unit.
    preservation, and up to three retries for malformed/incomplete output or
    transient LM Studio request failures.
 
+LM Studio currently applies grammar-enforced JSON schemas only to its stateless
+Chat Completions endpoint. Stateful Responses output is therefore protected by
+the same strict application-level JSON, ID, order, and engine-token validation;
+an invalid response is repaired conversationally before anything is committed.
+
 Each request adds only the chronological lines not already present in the
 conversation. Set **Batch by** to **Messages** to cap the number of target
 messages per request, or **Source characters** to pack consecutive messages up
@@ -106,8 +114,10 @@ History resets at file boundaries because the extracted formats do not encode
 a reliable cross-file story order. The configured **Response reserve** is kept
 free within the model's **Context window**; when the input no longer fits, the
 oldest complete conversation turns and then the oldest reference lines are
-removed. Token budgeting uses a conservative UTF-8 byte estimate so it remains
-model-independent.
+removed. If LM Studio reports a context overflow despite that estimate, the
+oldest complete turn is removed and the request is retried as a new shortened
+conversation. Token budgeting uses a conservative UTF-8 byte estimate so it
+remains model-independent.
 
 Set **Context window** to the context length configured for the loaded LM Studio
 model. For a good result, keep related event lines in their native file and

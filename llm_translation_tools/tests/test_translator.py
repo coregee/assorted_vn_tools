@@ -2,7 +2,7 @@ import copy
 import json
 import unittest
 
-from llm_translation_tools.lmstudio import LMStudioError
+from llm_translation_tools.lmstudio import LMStudioCompletion, LMStudioError
 from llm_translation_tools.translator import (
     TranslationEngine,
     TranslationError,
@@ -62,6 +62,30 @@ class RecordingClient:
         return response
 
 
+class StatefulRecordingClient:
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.calls = []
+
+    def response_completion(self, messages, model, temperature, max_tokens,
+                            response_format=None, reasoning_effort=None,
+                            previous_response_id=None):
+        self.calls.append({
+            "messages": copy.deepcopy(list(messages)),
+            "model": model,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "response_format": copy.deepcopy(response_format),
+            "reasoning_effort": reasoning_effort,
+            "previous_response_id": previous_response_id,
+        })
+        response = self.responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        content, response_id = response
+        return LMStudioCompletion(content, response_id)
+
+
 def response_for(line_id, translation):
     return json.dumps({
         "translations": [{"id": line_id, "translation": translation}],
@@ -99,6 +123,83 @@ class ResponseValidationTests(unittest.TestCase):
 
 
 class TranslationCycleTests(unittest.TestCase):
+    def test_stateful_follow_up_sends_only_the_new_turn(self):
+        path = "script/a.json"
+        lines = [line(path, 0, "一"), line(path, 1, "二")]
+        client = StatefulRecordingClient([
+            (response_for(lines[0]["id"], "One."), "resp_one"),
+            (response_for(lines[1]["id"], "Two."), "resp_two"),
+        ])
+
+        TranslationEngine(client).translate(
+            [{"path": path, "lines": lines}], SETTINGS
+        )
+
+        self.assertEqual(["system", "user"], [
+            message["role"] for message in client.calls[0]["messages"]
+        ])
+        self.assertIsNone(client.calls[0]["previous_response_id"])
+        self.assertEqual(["user"], [
+            message["role"] for message in client.calls[1]["messages"]
+        ])
+        self.assertEqual("resp_one", client.calls[1]["previous_response_id"])
+        self.assertNotIn("One.", client.calls[1]["messages"][0]["content"])
+
+    def test_context_overflow_drops_oldest_turn_and_restarts_conversation(self):
+        path = "script/a.json"
+        lines = [line(path, 0, "一"), line(path, 1, "二")]
+        overflow = LMStudioError(
+            "prompt exceeds model context length", status=400,
+            body='{"error":"context length exceeded"}',
+        )
+        client = StatefulRecordingClient([
+            (response_for(lines[0]["id"], "One."), "resp_one"),
+            overflow,
+            (response_for(lines[1]["id"], "Two."), "resp_two"),
+        ])
+
+        result = TranslationEngine(client).translate(
+            [{"path": path, "lines": lines}], SETTINGS
+        )
+
+        self.assertEqual(2, len(result))
+        self.assertEqual(["user"], [
+            message["role"] for message in client.calls[1]["messages"]
+        ])
+        self.assertEqual("resp_one", client.calls[1]["previous_response_id"])
+        self.assertEqual(["system", "user"], [
+            message["role"] for message in client.calls[2]["messages"]
+        ])
+        self.assertIsNone(client.calls[2]["previous_response_id"])
+        self.assertNotIn("一", client.calls[2]["messages"][-1]["content"])
+        self.assertIn("二", client.calls[2]["messages"][-1]["content"])
+
+    def test_expired_response_id_replays_local_history(self):
+        path = "script/a.json"
+        lines = [line(path, 0, "一"), line(path, 1, "二")]
+        expired = LMStudioError(
+            "previous_response_id was not found", status=404,
+        )
+        client = StatefulRecordingClient([
+            (response_for(lines[0]["id"], "One."), "resp_one"),
+            expired,
+            (response_for(lines[1]["id"], "Two."), "resp_two"),
+        ])
+
+        TranslationEngine(client).translate(
+            [{"path": path, "lines": lines}], SETTINGS
+        )
+
+        self.assertEqual("resp_one", client.calls[1]["previous_response_id"])
+        self.assertEqual(["user"], [
+            message["role"] for message in client.calls[1]["messages"]
+        ])
+        self.assertIsNone(client.calls[2]["previous_response_id"])
+        self.assertEqual(["system", "user", "assistant", "user"], [
+            message["role"] for message in client.calls[2]["messages"]
+        ])
+        self.assertIn("One.", client.calls[2]["messages"][-2]["content"])
+
     def test_batches_by_message_count_without_crossing_file_boundaries(self):
         path = "script/a.json"
         lines = [line(path, index, source) for index, source in enumerate(("一", "二", "三"))]

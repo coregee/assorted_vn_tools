@@ -7,6 +7,7 @@ import json
 import urllib.error
 import urllib.parse
 import urllib.request
+from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
 
 
@@ -46,6 +47,12 @@ class LMStudioError(Exception):
         super().__init__(message)
         self.status = status
         self.body = body
+
+
+@dataclass(frozen=True)
+class LMStudioCompletion:
+    content: str
+    response_id: Optional[str] = None
 
 
 def validate_base_url(value: str, allow_remote: bool = False) -> str:
@@ -121,6 +128,67 @@ class LMStudioClient:
             if isinstance(item, Mapping) and isinstance(item.get("id"), str):
                 models.append({"id": item["id"], "owned_by": item.get("owned_by")})
         return models
+
+    def response_completion(self, messages: Sequence[Mapping[str, str]], model: str,
+                            temperature: float = 0.2, max_tokens: int = 4096,
+                            response_format: Optional[Mapping[str, Any]] = None,
+                            reasoning_effort: Optional[str] = None,
+                            previous_response_id: Optional[str] = None,
+                            ) -> LMStudioCompletion:
+        """Create or continue a stored LM Studio Responses API conversation."""
+        if not isinstance(model, str) or not model.strip():
+            raise LMStudioError("select a loaded LM Studio model first")
+        payload: Dict[str, Any] = {
+            "model": model,
+            "input": [dict(message) for message in messages],
+            "temperature": temperature,
+            "max_output_tokens": max_tokens,
+            "stream": False,
+            "store": True,
+        }
+        if previous_response_id is not None:
+            payload["previous_response_id"] = previous_response_id
+        if response_format is not None:
+            json_schema = response_format.get("json_schema")
+            if response_format.get("type") == "json_schema" and isinstance(json_schema, Mapping):
+                payload["text"] = {"format": dict(json_schema, type="json_schema")}
+            else:
+                payload["text"] = {"format": dict(response_format)}
+        if reasoning_effort is not None:
+            payload["reasoning"] = {"effort": reasoning_effort}
+
+        response = self._request("POST", "/responses", payload)
+        if not isinstance(response, Mapping):
+            raise LMStudioError("LM Studio response has an unexpected shape")
+
+        text_parts: List[str] = []
+        output = response.get("output")
+        if isinstance(output, list):
+            for item in output:
+                if not isinstance(item, Mapping) or item.get("type") != "message":
+                    continue
+                content = item.get("content")
+                if isinstance(content, str):
+                    text_parts.append(content)
+                    continue
+                if not isinstance(content, list):
+                    continue
+                for part in content:
+                    if (isinstance(part, Mapping) and
+                            part.get("type") in ("output_text", "text") and
+                            isinstance(part.get("text"), str)):
+                        text_parts.append(part["text"])
+        if not text_parts and isinstance(response.get("output_text"), str):
+            text_parts.append(response["output_text"])
+        if not text_parts:
+            raise LMStudioError("LM Studio response content is not text")
+
+        response_id = response.get("id")
+        if response_id is None:
+            response_id = response.get("response_id")
+        if response_id is not None and not isinstance(response_id, str):
+            raise LMStudioError("LM Studio response ID is not text")
+        return LMStudioCompletion("".join(text_parts), response_id)
 
     def chat_completion(self, messages: Sequence[Mapping[str, str]], model: str,
                         temperature: float = 0.2, max_tokens: int = 4096,
