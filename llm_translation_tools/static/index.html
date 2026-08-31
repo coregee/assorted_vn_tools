@@ -3,8 +3,9 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="light">
+  <meta name="color-scheme" content="light dark">
   <title>VN Translation Workbench</title>
+  <script src="/theme.js"></script>
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
@@ -25,6 +26,9 @@
     </div>
 
     <nav class="topbar-actions" aria-label="Application actions">
+      <button class="button button-quiet button-icon" id="theme-toggle" type="button" aria-label="Switch to dark mode" aria-pressed="false" title="Switch to dark mode">
+        <span id="theme-icon" aria-hidden="true">&#9790;</span>
+      </button>
       <button class="button button-quiet button-icon" id="shortcuts-button" type="button" aria-label="Keyboard shortcuts" title="Keyboard shortcuts">?</button>
       <button class="button button-secondary" id="settings-button" type="button">
         <span aria-hidden="true">&#9881;</span>

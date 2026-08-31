@@ -134,7 +134,9 @@ class ServerIntegrationTests(unittest.TestCase):
         self.assertIn(b'id="choose-folder-button"', html)
         self.assertIn(b'id="extract-button"', html)
         self.assertIn(b'id="repack-button"', html)
+        self.assertIn(b'id="theme-toggle"', html)
         self.assertIn("default-src 'self'", headers["Content-Security-Policy"])
+        self.assertEqual(200, self.request("/theme.js")[0])
         self.assertEqual(200, self.request("/styles.css")[0])
         self.assertEqual(200, self.request("/app.js")[0])
 

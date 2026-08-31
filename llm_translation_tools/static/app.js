@@ -173,6 +173,8 @@
     allow_remote_lmstudio: false,
   });
 
+  const THEME_STORAGE_KEY = "translation-workbench.theme";
+
   const state = {
     projectPath: "",
     targetPath: "",
@@ -210,7 +212,7 @@
     "settings-form", "setting-base-url", "setting-model", "models-list", "models-status", "setting-target-language",
     "setting-batch-mode", "setting-batch-limit", "setting-context-window", "setting-response-reserve", "setting-temperature",
     "setting-enable-thinking", "setting-allow-remote", "setting-game-context", "setting-system-prompt", "load-models", "settings-status",
-    "save-default-settings", "save-settings", "shortcuts-button", "shortcuts-dialog",
+    "save-default-settings", "save-settings", "theme-toggle", "theme-icon", "shortcuts-button", "shortcuts-dialog",
   ];
 
   const elements = Object.fromEntries(elementIds.map((id) => [id, document.getElementById(id)]));
@@ -285,6 +287,26 @@
     } catch {
       // Storage is a convenience only; the project remains open without it.
     }
+  }
+
+  function applyTheme(theme, { persist = false } = {}) {
+    const normalizedTheme = theme === "dark" ? "dark" : "light";
+    document.documentElement.dataset.theme = normalizedTheme;
+    document.documentElement.style.colorScheme = normalizedTheme;
+    if (persist) safeStorageSet(THEME_STORAGE_KEY, normalizedTheme);
+
+    const dark = normalizedTheme === "dark";
+    const nextTheme = dark ? "light" : "dark";
+    const label = `Switch to ${nextTheme} mode`;
+    $("theme-toggle").setAttribute("aria-label", label);
+    $("theme-toggle").setAttribute("aria-pressed", String(dark));
+    $("theme-toggle").title = label;
+    $("theme-icon").textContent = dark ? "☀" : "☾";
+  }
+
+  function toggleTheme() {
+    const nextTheme = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
+    applyTheme(nextTheme, { persist: true });
   }
 
   function normalizeFileEntry(raw) {
@@ -1519,6 +1541,7 @@
     $("repack-button").addEventListener("click", () => startToolJob("repack"));
     $("dismiss-error").addEventListener("click", clearError);
     $("save-button").addEventListener("click", () => saveActiveFile());
+    $("theme-toggle").addEventListener("click", toggleTheme);
     $("settings-button").addEventListener("click", openSettings);
     $("shortcuts-button").addEventListener("click", () => $("shortcuts-dialog").showModal());
     $("settings-form").addEventListener("submit", saveSettings);
@@ -1619,6 +1642,7 @@
   }
 
   async function initialize() {
+    applyTheme(document.documentElement.dataset.theme);
     bindEvents();
     applySettingsForm();
     setStatus("Connecting to local server…");
