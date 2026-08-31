@@ -86,33 +86,27 @@ class StatefulRecordingClient:
         return LMStudioCompletion(content, response_id)
 
 
-def response_for(line_id, translation):
-    return json.dumps({
-        "translations": [{"id": line_id, "translation": translation}],
-    }, ensure_ascii=False)
+def response_for(translation):
+    return json.dumps([translation], ensure_ascii=False)
 
 
-def response_for_many(rows):
-    return json.dumps({
-        "translations": [
-            {"id": target["id"], "translation": translation}
-            for target, translation in rows
-        ],
-    }, ensure_ascii=False)
+def response_for_many(translations):
+    return json.dumps(list(translations), ensure_ascii=False)
 
 
 class ResponseValidationTests(unittest.TestCase):
-    def test_preserves_exact_ids_order_and_engine_tokens(self):
+    def test_assigns_expected_ids_in_order_and_preserves_engine_tokens(self):
         expected = [line("script/a.json", 0, "待って\\x81 «FE»")]
         result = parse_translation_response(
-            response_for(expected[0]["id"], "Wait\\x81 «FE»"),
+            response_for("Wait\\x81 «FE»"),
             expected,
         )
+        self.assertEqual(expected[0]["id"], result[0]["id"])
         self.assertEqual("Wait\\x81 «FE»", result[0]["translation"])
         self.assertNotIn("flagged", result[0])
 
         result = parse_translation_response(
-            response_for(expected[0]["id"], "Wait"),
+            response_for("Wait"),
             expected,
         )
         self.assertEqual("Wait", result[0]["translation"])
@@ -126,7 +120,7 @@ class ResponseValidationTests(unittest.TestCase):
             line("script/a.json", 1, "行こう«FE»"),
         ]
         result = parse_translation_response(
-            response_for_many(((expected[0], "Wait"), (expected[1], "Let's go«FE»"))),
+            response_for_many(("Wait", "Let's go«FE»")),
             expected,
         )
 
@@ -136,13 +130,20 @@ class ResponseValidationTests(unittest.TestCase):
     def test_rejects_empty_model_output(self):
         expected = [line("script/a.json", 0, "待って")]
         with self.assertRaises(TranslationError):
-            parse_translation_response(response_for(expected[0]["id"], "  "), expected)
+            parse_translation_response(response_for("  "), expected)
+
+    def test_rejects_non_array_or_non_string_entries(self):
+        expected = [line("script/a.json", 0, "待って")]
+        with self.assertRaisesRegex(TranslationError, "JSON array"):
+            parse_translation_response('{"translation":"Wait"}', expected)
+        with self.assertRaisesRegex(TranslationError, "translation 1 must be a string"):
+            parse_translation_response('[{"translation":"Wait"}]', expected)
 
 
 class TranslationCycleTests(unittest.TestCase):
     def test_changed_engine_tokens_are_saved_and_flagged_without_retry(self):
         target = line("script/a.json", 0, "待って\\x81")
-        client = RecordingClient([response_for(target["id"], "Wait")])
+        client = RecordingClient([response_for("Wait")])
         committed = []
 
         result = TranslationEngine(client).translate(
@@ -160,8 +161,8 @@ class TranslationCycleTests(unittest.TestCase):
         path = "script/a.json"
         lines = [line(path, 0, "一"), line(path, 1, "二")]
         client = StatefulRecordingClient([
-            (response_for(lines[0]["id"], "One."), "resp_one"),
-            (response_for(lines[1]["id"], "Two."), "resp_two"),
+            (response_for("One."), "resp_one"),
+            (response_for("Two."), "resp_two"),
         ])
 
         TranslationEngine(client).translate(
@@ -186,9 +187,9 @@ class TranslationCycleTests(unittest.TestCase):
             body='{"error":"context length exceeded"}',
         )
         client = StatefulRecordingClient([
-            (response_for(lines[0]["id"], "One."), "resp_one"),
+            (response_for("One."), "resp_one"),
             overflow,
-            (response_for(lines[1]["id"], "Two."), "resp_two"),
+            (response_for("Two."), "resp_two"),
         ])
 
         result = TranslationEngine(client).translate(
@@ -214,9 +215,9 @@ class TranslationCycleTests(unittest.TestCase):
             "previous_response_id was not found", status=404,
         )
         client = StatefulRecordingClient([
-            (response_for(lines[0]["id"], "One."), "resp_one"),
+            (response_for("One."), "resp_one"),
             expired,
-            (response_for(lines[1]["id"], "Two."), "resp_two"),
+            (response_for("Two."), "resp_two"),
         ])
 
         TranslationEngine(client).translate(
@@ -237,8 +238,8 @@ class TranslationCycleTests(unittest.TestCase):
         path = "script/a.json"
         lines = [line(path, index, source) for index, source in enumerate(("一", "二", "三"))]
         client = RecordingClient([
-            response_for_many(((lines[0], "One."), (lines[1], "Two."))),
-            response_for(lines[2]["id"], "Three."),
+            response_for_many(("One.", "Two.")),
+            response_for("Three."),
         ])
 
         committed = []
@@ -269,11 +270,11 @@ class TranslationCycleTests(unittest.TestCase):
             line(path, 4, "e" * 5),
         ]
         client = RecordingClient([
-            response_for(lines[0]["id"], "Long."),
+            response_for("Long."),
             response_for_many(tuple(
-                (lines[index], "Batch %d." % index) for index in (1, 2, 3)
+                "Batch %d." % index for index in (1, 2, 3)
             )),
-            response_for(lines[4]["id"], "Last."),
+            response_for("Last."),
         ])
 
         TranslationEngine(client).translate(
@@ -303,9 +304,9 @@ class TranslationCycleTests(unittest.TestCase):
             {"path": "script/_names.json", "schema": "glossary", "lines": [glossary_line]},
         ]
         client = RecordingClient([
-            response_for(a_lines[0]["id"], "Good morning."),
-            response_for(a_lines[1]["id"], "I'm still sleepy."),
-            response_for(b_lines[0]["id"], "Who is it?"),
+            response_for("Good morning."),
+            response_for("I'm still sleepy."),
+            response_for("Who is it?"),
         ])
 
         suggestions = TranslationEngine(client).translate(
@@ -334,12 +335,15 @@ class TranslationCycleTests(unittest.TestCase):
         self.assertNotIn("<<<REFERENCE", client.calls[1]["messages"][-1]["content"])
         self.assertEqual(2048, client.calls[0]["max_tokens"])
         self.assertIsNotNone(client.calls[0]["response_format"])
+        response_schema = client.calls[0]["response_format"]["json_schema"]["schema"]
+        self.assertEqual({"type": "array", "items": {"type": "string"}},
+                         response_schema)
         self.assertEqual("medium", client.calls[0]["reasoning_effort"])
 
     def test_removes_japanese_line_breaks_from_source_sent_to_model(self):
         path = "script/a.json"
         target = line(path, 0, "最初の行\r\n次の行\u2028最後の行")
-        client = RecordingClient([response_for(target["id"], "The complete line.")])
+        client = RecordingClient([response_for("The complete line.")])
 
         TranslationEngine(client).translate(
             [{"path": path, "lines": [target]}], SETTINGS
@@ -352,7 +356,7 @@ class TranslationCycleTests(unittest.TestCase):
 
     def test_thinking_can_be_disabled_for_model_requests(self):
         target = line("script/a.json", 0, "こんにちは")
-        client = RecordingClient([response_for(target["id"], "Hello.")])
+        client = RecordingClient([response_for("Hello.")])
 
         TranslationEngine(client).translate(
             [{"path": "script/a.json", "lines": [target]}],
@@ -360,6 +364,24 @@ class TranslationCycleTests(unittest.TestCase):
         )
 
         self.assertEqual("none", client.calls[0]["reasoning_effort"])
+
+    def test_legacy_persisted_response_instruction_is_replaced(self):
+        target = line("script/a.json", 0, "こんにちは")
+        client = RecordingClient([response_for("Hello.")])
+        legacy_prompt = (
+            "Translate into {target_language}. Return only the requested JSON object and\n"
+            "one translation for every target ID, in the same order."
+        )
+
+        TranslationEngine(client).translate(
+            [{"path": "script/a.json", "lines": [target]}],
+            {**SETTINGS, "system_prompt": legacy_prompt},
+        )
+
+        system_prompt = client.calls[0]["messages"][0]["content"]
+        self.assertNotIn("requested JSON object", system_prompt)
+        self.assertIn("JSON array", system_prompt)
+        self.assertIn("Translate into English.", system_prompt)
 
     def test_first_turn_for_a_late_target_contains_all_past_lines_but_no_future(self):
         path = "script/a.json"
@@ -369,7 +391,7 @@ class TranslationCycleTests(unittest.TestCase):
             line(path, 2, "翻訳対象"),
             line(path, 3, "未来の行"),
         ]
-        client = RecordingClient([response_for(lines[2]["id"], "The target.")])
+        client = RecordingClient([response_for("The target.")])
 
         TranslationEngine(client).translate(
             [{"path": path, "lines": lines}], SETTINGS, line_ids=[lines[2]["id"]]
@@ -394,7 +416,7 @@ class TranslationCycleTests(unittest.TestCase):
             "context_window": 1400,
             "response_reserve_percent": 25,
         }
-        client = RecordingClient([response_for(lines[2]["id"], "The target.")])
+        client = RecordingClient([response_for("The target.")])
 
         TranslationEngine(client).translate(
             [{"path": path, "lines": lines}], settings, line_ids=[lines[2]["id"]]
@@ -418,8 +440,8 @@ class TranslationCycleTests(unittest.TestCase):
             "response_reserve_percent": 25,
         }
         client = RecordingClient([
-            response_for(lines[0]["id"], "First."),
-            response_for(lines[1]["id"], "Second."),
+            response_for("First."),
+            response_for("Second."),
         ])
 
         TranslationEngine(client).translate(
@@ -435,7 +457,7 @@ class TranslationCycleTests(unittest.TestCase):
 
     def test_invalid_response_gets_one_contextual_repair(self):
         target = line("script/a.json", 0, "こんにちは")
-        valid = response_for(target["id"], "Hello.")
+        valid = response_for("Hello.")
         client = RecordingClient(["not json", valid])
 
         result = TranslationEngine(client).translate(
@@ -454,7 +476,7 @@ class TranslationCycleTests(unittest.TestCase):
         target = line("script/a.json", 0, "こんにちは")
         client = RecordingClient([
             LMStudioError("request timed out"),
-            response_for(target["id"], "Hello."),
+            response_for("Hello."),
         ])
         committed = []
 
@@ -472,11 +494,11 @@ class TranslationCycleTests(unittest.TestCase):
     def test_wrong_line_count_is_retried_until_the_turn_is_complete(self):
         path = "script/a.json"
         targets = [line(path, 0, "一"), line(path, 1, "二")]
-        incomplete = response_for(targets[0]["id"], "One.")
+        incomplete = response_for("One.")
         client = RecordingClient([
             incomplete,
             incomplete,
-            response_for_many(((targets[0], "One."), (targets[1], "Two."))),
+            response_for_many(("One.", "Two.")),
         ])
 
         result = TranslationEngine(client).translate(
@@ -492,7 +514,7 @@ class TranslationCycleTests(unittest.TestCase):
     def test_invalid_turn_stops_after_three_retries(self):
         path = "script/a.json"
         targets = [line(path, 0, "一"), line(path, 1, "二")]
-        incomplete = response_for(targets[0]["id"], "One.")
+        incomplete = response_for("One.")
         client = RecordingClient([incomplete] * 4)
 
         with self.assertRaisesRegex(TranslationError, "after 3 retries"):
@@ -507,7 +529,7 @@ class TranslationCycleTests(unittest.TestCase):
         target = line("script/a.json", 0, "こんにちは")
         client = RecordingClient([
             LMStudioError("unsupported response format", status=400),
-            response_for(target["id"], "Hello."),
+            response_for("Hello."),
         ])
 
         result = TranslationEngine(client).translate(

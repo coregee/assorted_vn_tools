@@ -15,8 +15,16 @@ DEFAULT_SYSTEM_PROMPT = """You are translating a Japanese visual novel into poli
 natural {target_language}. Preserve character voice, subtext, terminology, names, and the
 relationship implied by honorifics. Use the supplied chronological scene context instead
 of translating lines in isolation. Do not add explanations. Preserve every engine token
-exactly, including literal \\xHH and «HH» tokens. Return only the requested JSON object and
-one translation for every target ID, in the same order."""
+exactly, including literal \\xHH and «HH» tokens."""
+
+RESPONSE_FORMAT_INSTRUCTION = """RESPONSE FORMAT:
+Return only a JSON array containing one translation string for every TARGET line, in the
+same order. Do not return IDs, keys, filenames, or explanations."""
+
+_LEGACY_RESPONSE_INSTRUCTION = re.compile(
+    r"\s*Return only the requested JSON object and\s+"
+    r"one translation for every target ID, in the same order\.\s*$"
+)
 
 MESSAGE_OVERHEAD_TOKENS = 12
 MIN_RESPONSE_TOKENS = 64
@@ -81,30 +89,21 @@ def parse_translation_response(raw: str,
         value = json.loads(text)
     except json.JSONDecodeError as exc:
         raise TranslationError("response is not valid JSON: %s" % exc) from exc
-    if not isinstance(value, dict) or set(value) != {"translations"}:
-        raise TranslationError("response must be an object containing only 'translations'")
-    rows = value["translations"]
-    if not isinstance(rows, list):
-        raise TranslationError("'translations' must be an array")
-    expected_ids = [line["id"] for line in expected]
-    if len(rows) != len(expected_ids):
+    if not isinstance(value, list):
+        raise TranslationError("response must be a JSON array of translation strings")
+    if len(value) != len(expected):
         raise TranslationError("expected %d translations, received %d" %
-                               (len(expected_ids), len(rows)))
+                               (len(expected), len(value)))
     result: List[Dict[str, Any]] = []
-    for index, (row, expected_line) in enumerate(zip(rows, expected)):
-        if not isinstance(row, dict) or set(row) != {"id", "translation"}:
-            raise TranslationError("translation %d must contain only 'id' and 'translation'" % index)
-        if row.get("id") != expected_line["id"]:
-            raise TranslationError("translation IDs must exactly match the requested order")
-        translated = row.get("translation")
+    for index, (translated, expected_line) in enumerate(zip(value, expected)):
         if not isinstance(translated, str):
-            raise TranslationError("translation for %s must be a string" % row.get("id"))
+            raise TranslationError("translation %d must be a string" % (index + 1))
         if not translated.strip():
-            raise TranslationError("translation for %s is empty" % row.get("id"))
+            raise TranslationError("translation %d is empty" % (index + 1))
         source_tokens = _engine_tokens(expected_line["source"])
         translated_tokens = _engine_tokens(translated)
         parsed_row: Dict[str, Any] = {
-            "id": row["id"],
+            "id": expected_line["id"],
             "translation": translated,
         }
         if translated_tokens != source_tokens:
@@ -285,8 +284,9 @@ def batch_prompt(batch: TranslationBatch, context_start: int,
         displayed.append(_display_line(line, role, suggested, glossary))
     blocks.append("\n".join(displayed))
     blocks.append(
-        'Return exactly: {"translations":[{"id":"the exact target ID",'
-        '"translation":"translated text"}, ...]}. Preserve all engine tokens verbatim.'
+        'Return exactly one JSON array of translation strings in TARGET order: '
+        '["first translation", "second translation", ...]. Do not return IDs, keys, '
+        'filenames, or explanations. Preserve all engine tokens verbatim.'
     )
     return "\n\n".join(blocks)
 
@@ -461,10 +461,14 @@ class TranslationEngine:
         context_start = 0
 
         custom_prompt = settings.get("system_prompt") or DEFAULT_SYSTEM_PROMPT
+        # Projects persist their prompt text. Remove the exact former default suffix so an
+        # existing project cannot give the model conflicting old and new response contracts.
+        custom_prompt = _LEGACY_RESPONSE_INSTRUCTION.sub("", custom_prompt).rstrip()
         custom_prompt = custom_prompt.replace("{target_language}", settings["target_language"])
         system_content = (
             custom_prompt.rstrip() + "\n\nTARGET LANGUAGE:\n" + settings["target_language"] +
-            "\n\nGAME CONTEXT:\n" + (settings.get("game_context") or "No game context provided.")
+            "\n\nGAME CONTEXT:\n" + (settings.get("game_context") or "No game context provided.") +
+            "\n\n" + RESPONSE_FORMAT_INSTRUCTION
         )
 
         for batch_number, batch in enumerate(batches, 1):
@@ -545,8 +549,9 @@ class TranslationEngine:
                     repair_attempt += 1
                     repair = (
                         "Your previous response was invalid: %s\nRetry this same turn now. "
-                        "Return only the exact JSON object, with every requested ID once and "
-                        "in order. Preserve every engine token from its source line." % error
+                        "Return only a JSON array with one translation string per TARGET line "
+                        "in the requested order. Do not return IDs, keys, filenames, or "
+                        "explanations. Preserve every engine token from its source line." % error
                     )
                     repair_candidate = request_messages + [
                         {"role": "assistant", "content": raw},

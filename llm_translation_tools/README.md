@@ -91,17 +91,17 @@ coherent unit.
 1. an editable system prompt, target language, and game-level context;
 2. every earlier line in the file, in native order, including existing
    translations where available;
-3. one or more stable, delimited target IDs in native script order;
+3. one or more stable, delimited target lines in native script order;
 4. the continuing user/assistant conversation from earlier lines in the same
    event file;
 5. translated speaker-glossary context, with Japanese source line breaks removed;
-6. a strict JSON response schema, exact ID/order validation, per-entry engine-token
-   review flags, and up to three retries for malformed/incomplete output or
-   transient LM Studio request failures.
+6. a simple JSON string-array response schema, exact count/order validation,
+   per-entry engine-token review flags, and up to three retries for
+   malformed/incomplete output or transient LM Studio request failures.
 
 LM Studio currently applies grammar-enforced JSON schemas only to its stateless
 Chat Completions endpoint. Stateful Responses output is therefore protected by
-the same strict application-level JSON, ID, and order validation. Engine-token
+the same strict application-level JSON, count, and order validation. Engine-token
 mismatches are accepted with per-entry review flags; structurally invalid responses
 are repaired conversationally before anything is committed.
 
@@ -165,8 +165,8 @@ native game JSON consumed by the repackers.
 - Jobs save after every successful request turn. Cancelling or failing a later
   request preserves all earlier committed translations, including partial
   progress within the current file.
-- A request turn is not committed until its JSON contains every expected line
-  in order. Timeouts, connection failures, rate limits, server errors, and
+- A request turn is not committed until its JSON array contains one string for every
+  expected line in order. Timeouts, connection failures, rate limits, server errors, and
   invalid line counts are retried up to three times before the job stops.
 
 Native wrapping, byte limits, and character encoding rules still apply. The

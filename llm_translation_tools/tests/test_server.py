@@ -25,12 +25,10 @@ class FakeLMStudioClient:
         prompt = messages[-1]["content"]
         encoded_ids = re.findall(r"<<<TARGET (\"(?:\\.|[^\"])*\")>>>", prompt)
         line_ids = [json.loads(value) for value in encoded_ids]
-        return json.dumps({
-            "translations": [
-                {"id": line_id, "translation": "Translated line %d" % (index + 1)}
-                for index, line_id in enumerate(line_ids)
-            ],
-        })
+        return json.dumps([
+            "Translated line %d" % (index + 1)
+            for index, _line_id in enumerate(line_ids)
+        ])
 
 
 class BlockingSecondTurnClient(FakeLMStudioClient):

@@ -19,23 +19,8 @@ TRANSLATIONS_RESPONSE_FORMAT: Dict[str, Any] = {
         "name": "vn_line_translations",
         "strict": True,
         "schema": {
-            "type": "object",
-            "additionalProperties": False,
-            "required": ["translations"],
-            "properties": {
-                "translations": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "additionalProperties": False,
-                        "required": ["id", "translation"],
-                        "properties": {
-                            "id": {"type": "string"},
-                            "translation": {"type": "string"},
-                        },
-                    },
-                }
-            },
+            "type": "array",
+            "items": {"type": "string"},
         },
     },
 }
