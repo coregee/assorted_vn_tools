@@ -109,12 +109,29 @@ class ResponseValidationTests(unittest.TestCase):
             expected,
         )
         self.assertEqual("Wait\\x81 «FE»", result[0]["translation"])
+        self.assertNotIn("flagged", result[0])
 
-        with self.assertRaises(TranslationError):
-            parse_translation_response(
-                response_for(expected[0]["id"], "Wait"),
-                expected,
-            )
+        result = parse_translation_response(
+            response_for(expected[0]["id"], "Wait"),
+            expected,
+        )
+        self.assertEqual("Wait", result[0]["translation"])
+        self.assertTrue(result[0]["flagged"])
+        self.assertEqual(["\\x81", "«FE»"], result[0]["expected_engine_tokens"])
+        self.assertEqual([], result[0]["returned_engine_tokens"])
+
+    def test_flags_only_the_entry_with_changed_engine_tokens(self):
+        expected = [
+            line("script/a.json", 0, "待って\\x81"),
+            line("script/a.json", 1, "行こう«FE»"),
+        ]
+        result = parse_translation_response(
+            response_for_many(((expected[0], "Wait"), (expected[1], "Let's go«FE»"))),
+            expected,
+        )
+
+        self.assertTrue(result[0]["flagged"])
+        self.assertNotIn("flagged", result[1])
 
     def test_rejects_empty_model_output(self):
         expected = [line("script/a.json", 0, "待って")]
@@ -123,6 +140,22 @@ class ResponseValidationTests(unittest.TestCase):
 
 
 class TranslationCycleTests(unittest.TestCase):
+    def test_changed_engine_tokens_are_saved_and_flagged_without_retry(self):
+        target = line("script/a.json", 0, "待って\\x81")
+        client = RecordingClient([response_for(target["id"], "Wait")])
+        committed = []
+
+        result = TranslationEngine(client).translate(
+            [{"path": "script/a.json", "lines": [target]}],
+            SETTINGS,
+            turn_completed=lambda _path, rows: committed.extend(rows),
+        )
+
+        self.assertEqual(1, len(client.calls))
+        self.assertEqual("Wait", result[0]["suggestion"])
+        self.assertTrue(result[0]["flagged"])
+        self.assertTrue(committed[0]["flagged"])
+
     def test_stateful_follow_up_sends_only_the_new_turn(self):
         path = "script/a.json"
         lines = [line(path, 0, "一"), line(path, 1, "二")]

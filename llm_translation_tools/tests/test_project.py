@@ -5,6 +5,7 @@ from pathlib import Path
 
 from llm_translation_tools.project import (
     FileConflict,
+    PROJECT_REVIEW_FILE,
     PROJECT_SETTINGS_FILE,
     Project,
     ProjectError,
@@ -153,6 +154,38 @@ class ProjectAdapterTests(unittest.TestCase):
                 [{"id": snapshot["lines"][0]["id"], "translation": "broken"}],
             )
 
+    def test_review_flag_persists_outside_native_json_and_clears_on_edit(self):
+        snapshot = self.project.read_file("script/sstar.json")
+        line = snapshot["lines"][0]
+        flagged = self.project.update_file(
+            snapshot["path"],
+            snapshot["token"],
+            [{
+                "id": line["id"],
+                "translation": "Wait",
+                "flagged": True,
+                "flag_reason": "Engine delimiters differ from the source; review this translation.",
+                "expected_engine_tokens": ["\\x81"],
+                "returned_engine_tokens": [],
+            }],
+        )
+
+        self.assertTrue((self.base / PROJECT_REVIEW_FILE).is_file())
+        self.assertEqual(["\\x81"],
+                         flagged["lines"][0]["review_flag"]["expected_engine_tokens"])
+        self.assertEqual(1, {
+            item["path"]: item for item in self.project.list_files()
+        }["script/sstar.json"]["flagged_count"])
+        native = json.loads((self.script / "sstar.json").read_text(encoding="utf-8"))
+        self.assertNotIn("review_flag", native[0])
+
+        cleared = self.project.update_file(
+            flagged["path"],
+            flagged["token"],
+            [{"id": line["id"], "translation": "Wait\\x81"}],
+        )
+        self.assertIsNone(cleared["lines"][0]["review_flag"])
+
     def test_paths_are_confined_to_script_workspace(self):
         outside = self.base / "outside.json"
         write_json(outside, [{"message": "outside", "translated": None}])
@@ -166,6 +199,7 @@ class ProjectAdapterTests(unittest.TestCase):
         direct = Project.open(str(self.script))
         self.assertEqual(".", direct.script_dir_string)
         self.assertFalse(PROJECT_SETTINGS_FILE.lower().endswith(".json"))
+        self.assertFalse(PROJECT_REVIEW_FILE.lower().endswith(".json"))
 
         direct.save_project_settings({"game_context": "A mystery."})
         state_path = self.script / PROJECT_SETTINGS_FILE

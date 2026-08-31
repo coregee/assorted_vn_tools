@@ -302,6 +302,7 @@ class TranslationJob:
                     "batches": self.batches,
                 },
                 "result_count": len(self.suggestions),
+                "flagged_count": sum(bool(item.get("flagged")) for item in self.suggestions),
                 "written_files": list(self.written_files),
                 "error": self.error,
                 "cancellation_requested": self.cancel_event.is_set(),
@@ -363,6 +364,10 @@ class JobManager:
                 updates = [{
                     "id": suggestion["id"],
                     "translation": suggestion["suggestion"],
+                    "flagged": bool(suggestion.get("flagged")),
+                    "flag_reason": suggestion.get("flag_reason"),
+                    "expected_engine_tokens": suggestion.get("expected_engine_tokens", []),
+                    "returned_engine_tokens": suggestion.get("returned_engine_tokens", []),
                 } for suggestion in suggestions]
                 updated = project.update_file(path, file_data["token"], updates)
                 file_data["token"] = updated["token"]

@@ -294,6 +294,7 @@
     const lineCount = Number(raw.line_count ?? raw.lines ?? raw.total ?? 0);
     const translatableCount = Number(raw.translatable_count ?? raw.writable_count ?? lineCount);
     const translatedCount = Number(raw.translated_count ?? raw.translated ?? raw.completed ?? 0);
+    const flaggedCount = Number(raw.flagged_count ?? 0);
     return {
       path,
       name: String(raw.name || baseName(path)),
@@ -301,6 +302,7 @@
       line_count: Number.isFinite(lineCount) ? lineCount : 0,
       translatable_count: Number.isFinite(translatableCount) ? translatableCount : lineCount,
       translated_count: Number.isFinite(translatedCount) ? translatedCount : 0,
+      flagged_count: Number.isFinite(flaggedCount) ? flaggedCount : 0,
       token: raw.token ?? null,
     };
   }
@@ -360,6 +362,7 @@
       context: normalizeContext(raw.context ?? raw.note ?? metadata.context ?? metadata.note ?? ""),
       metadata,
       translatable: raw.translatable !== false,
+      reviewFlag: raw.review_flag ?? null,
     };
   }
 
@@ -519,6 +522,12 @@
       const percent = counts.translatable ? Math.round((counts.translated / counts.translatable) * 100) : 0;
       const progress = createElement("span", "file-percent", `${percent}%`);
       progress.title = `${counts.translated} of ${counts.translatable} translatable lines (${counts.total} total)`;
+      const flaggedCount = file.flagged_count;
+      if (flaggedCount) {
+        progress.textContent = `⚑ ${flaggedCount} · ${percent}%`;
+        progress.classList.add("has-review-flags");
+        progress.title += `; ${flaggedCount} translation${flaggedCount === 1 ? "" : "s"} flagged for review`;
+      }
       button.append(icon, copy, progress);
       row.append(checkbox, button);
       fragment.append(row);
@@ -797,6 +806,7 @@
       card.classList.toggle("is-selected", state.selected.has(line.key));
       card.classList.toggle("is-dirty", state.dirty.has(line.key));
       card.classList.toggle("is-untranslatable", !line.translatable);
+      card.classList.toggle("is-flagged", Boolean(line.reviewFlag));
 
       const selectWrap = createElement("label", "line-select-wrap");
       selectWrap.append(createElement("span", "sr-only", `Select line ${line.index}`));
@@ -815,11 +825,15 @@
       if (line.emptyIsApplied && line.hasTranslation && line.translation === "") {
         meta.append(createElement("span", "kind-badge blank-output-badge", "Intentional blank"));
       }
+      if (line.reviewFlag) meta.append(createElement("span", "review-flag-badge", "Review delimiters"));
       if (!line.translatable) meta.append(createElement("span", "locked-label", "Not translatable"));
       content.append(meta);
 
       appendLineSection(content, "Source", line.sourceDisplay || "(empty source)", "source-text");
       if (line.context) appendLineSection(content, "Context", line.context, "context-text");
+      if (line.reviewFlag) {
+        appendLineSection(content, "Review flag", line.reviewFlag.reason, "review-flag-text");
+      }
 
       const translationSection = createElement("div", "line-section");
       const labelRow = createElement("div", "line-label-row");
@@ -967,6 +981,7 @@
         line.originalValue = saved.translation;
         line.originalTranslation = saved.translation ?? "";
         line.originalActive = saved.translation !== null && (line.emptyIsApplied || saved.translation !== "");
+        line.reviewFlag = null;
         const current = state.dirty.get(saved.key);
         if (current && current.id === saved.id && current.translation === saved.translation) {
           state.dirty.delete(saved.key);
@@ -978,10 +993,9 @@
         entry.token = file.token;
         entry.translatable_count = file.lines.filter((line) => line.translatable).length;
         entry.translated_count = file.lines.filter((line) => line.translatable && line.hasTranslation).length;
+        entry.flagged_count = file.lines.filter((line) => line.reviewFlag).length;
       }
-      $("line-list").querySelectorAll(".line-card").forEach((card) => {
-        card.classList.toggle("is-dirty", state.dirty.has(card.dataset.lineKey));
-      });
+      renderLineList();
       updateDirtyUi();
       renderProjectStats();
       renderFileList();
@@ -1219,6 +1233,7 @@
       percentage: percentage === null || !Number.isFinite(percentage) ? null : clamp(percentage, 0, 100),
       message: String(job.message ?? job.detail ?? job.current_file ?? ""),
       error: job.error ?? job.failure ?? null,
+      flagged: Number(job.flagged_count ?? 0) || 0,
       raw: payload,
     };
   }
@@ -1394,7 +1409,8 @@
     }
     await refreshTranslatedFiles();
     const count = Number(job.completed || job.raw?.result_count || 0);
-    setStatus(`Translated and saved ${count} line${count === 1 ? "" : "s"}`);
+    setStatus(`Translated and saved ${count} line${count === 1 ? "" : "s"}` +
+      (job.flagged ? `; flagged ${job.flagged} for delimiter review` : ""));
   }
 
   async function refreshTranslatedFiles({ preserveSelection = false } = {}) {

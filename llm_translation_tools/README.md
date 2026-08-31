@@ -95,14 +95,15 @@ coherent unit.
 4. the continuing user/assistant conversation from earlier lines in the same
    event file;
 5. translated speaker-glossary context, with Japanese source line breaks removed;
-6. a strict JSON response schema, exact ID/order validation, engine-token
-   preservation, and up to three retries for malformed/incomplete output or
+6. a strict JSON response schema, exact ID/order validation, per-entry engine-token
+   review flags, and up to three retries for malformed/incomplete output or
    transient LM Studio request failures.
 
 LM Studio currently applies grammar-enforced JSON schemas only to its stateless
 Chat Completions endpoint. Stateful Responses output is therefore protected by
-the same strict application-level JSON, ID, order, and engine-token validation;
-an invalid response is repaired conversationally before anything is committed.
+the same strict application-level JSON, ID, and order validation. Engine-token
+mismatches are accepted with per-entry review flags; structurally invalid responses
+are repaired conversationally before anything is committed.
 
 Each request adds only the chronological lines not already present in the
 conversation. Set **Batch by** to **Messages** to cap the number of target
@@ -146,7 +147,10 @@ The adapter changes only the native translation value. It does not add editor
 metadata to game JSON or reorder records. Successful model output is saved
 directly through the same native-field adapter used by manual edits.
 Protected Dasaku engine-variable fields are read-only. Sstar `\xHH` and Etutane
-`«HH»` engine tokens must be reproduced exactly or the model batch is rejected.
+`«HH»` engine tokens should be reproduced exactly. A translation with missing,
+changed, or reordered tokens is still saved, but that individual entry is flagged
+for review. Review flags persist in `.llm_translation_tools.review`, outside the
+native game JSON consumed by the repackers.
 
 ## Local safety and persistence
 

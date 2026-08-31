@@ -21,6 +21,7 @@ from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Optional,
 # Deliberately not ``*.json``: when the opened root is the script directory itself,
 # every existing repacker globs JSON files and would try to ingest application config.
 PROJECT_SETTINGS_FILE = ".llm_translation_tools.settings"
+PROJECT_REVIEW_FILE = ".llm_translation_tools.review"
 PROJECT_SETTING_KEYS = frozenset(
     ("system_prompt", "game_context", "target_language", "model", "enable_thinking", "temperature",
      "context_window", "response_reserve_percent", "batch_mode", "batch_limit")
@@ -313,12 +314,37 @@ class Project:
         schema, bindings = _schema_and_bindings(document)
         return raw, document, schema, bindings
 
-    def _normalized(self, path: Path, schema: str, bindings: Sequence[_Binding]) -> List[Dict[str, Any]]:
+    def _load_review_flags(self) -> Dict[str, Dict[str, Any]]:
+        path = self.root / PROJECT_REVIEW_FILE
+        if not path.exists():
+            return {}
+        try:
+            resolved = path.resolve(strict=True)
+            if not _inside(self.root, resolved) or not resolved.is_file():
+                return {}
+            value = json.loads(resolved.read_text(encoding="utf-8-sig"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            return {}
+        if not isinstance(value, Mapping):
+            return {}
+        return {
+            line_id: dict(flag)
+            for line_id, flag in value.items()
+            if isinstance(line_id, str) and isinstance(flag, Mapping)
+        }
+
+    def _normalized(self, path: Path, schema: str, bindings: Sequence[_Binding],
+                    review_flags: Optional[Mapping[str, Mapping[str, Any]]] = None,
+                    ) -> List[Dict[str, Any]]:
         relative = self._relative(path)
         lines: List[Dict[str, Any]] = []
         for index, binding in enumerate(bindings):
+            line_id = relative + "#" + binding.pointer
+            review_flag = (review_flags or {}).get(line_id)
+            if review_flag and review_flag.get("source") not in (None, binding.source):
+                review_flag = None
             lines.append({
-                "id": relative + "#" + binding.pointer,
+                "id": line_id,
                 "index": index,
                 "source": binding.source,
                 "source_segments": binding.source_segments,
@@ -331,12 +357,14 @@ class Project:
                 "translatable": binding.translatable,
                 "context": binding.context,
                 "metadata": binding.metadata,
+                "review_flag": review_flag,
             })
         return lines
 
     def list_files(self) -> List[Dict[str, Any]]:
         files: List[Dict[str, Any]] = []
         with self._lock:
+            review_flags = self._load_review_flags()
             candidates = (path for path in self.script_root.iterdir()
                           if path.is_file() and path.suffix.lower() == ".json")
             for path in sorted(candidates, key=lambda p: p.as_posix().lower()):
@@ -352,13 +380,19 @@ class Project:
                 except InvalidScript:
                     # The script directory can contain manifests and other JSON assets.
                     continue
+                relative = self._relative(resolved)
                 files.append({
-                    "path": self._relative(resolved),
+                    "path": relative,
                     "schema": schema,
                     "line_count": len(bindings),
                     "translatable_count": sum(line.translatable for line in bindings),
                     "translated_count": sum(line.translatable and line.translation_active
                                               for line in bindings),
+                    "flagged_count": sum(
+                        bool(review_flags.get(relative + "#" + line.pointer)) and
+                        review_flags[relative + "#" + line.pointer].get("source") in
+                        (None, line.source)
+                        for line in bindings),
                     "token": _token(raw),
                 })
         return files
@@ -367,11 +401,12 @@ class Project:
         with self._lock:
             path = self.resolve_file(relative_path)
             raw, _document, schema, bindings = self._load_path(path)
+            review_flags = self._load_review_flags()
             return {
                 "path": self._relative(path),
                 "schema": schema,
                 "token": _token(raw),
-                "lines": self._normalized(path, schema, bindings),
+                "lines": self._normalized(path, schema, bindings, review_flags),
             }
 
     def update_file(self, relative_path: str, expected_token: str,
@@ -387,6 +422,8 @@ class Project:
                 raise FileConflict("file changed on disk; reload it before saving")
             relative = self._relative(path)
             by_id = {relative + "#" + line.pointer: line for line in bindings}
+            review_flags = self._load_review_flags()
+            original_review_flags = dict(review_flags)
             seen = set()
             for update in updates:
                 if not isinstance(update, Mapping):
@@ -407,18 +444,43 @@ class Project:
                     raise ProjectError("translation for %s must be a string or null" % line_id)
                 if value is not None and not binding.translatable:
                     raise ProjectError("line is protected and cannot be translated: %s" % line_id)
+                flagged = update.get("flagged", False)
+                if not isinstance(flagged, bool):
+                    raise ProjectError("flagged for %s must be a boolean" % line_id)
+                if flagged:
+                    reason = update.get("flag_reason")
+                    expected_tokens = update.get("expected_engine_tokens", [])
+                    returned_tokens = update.get("returned_engine_tokens", [])
+                    if reason is not None and not isinstance(reason, str):
+                        raise ProjectError("flag reason for %s must be a string" % line_id)
+                    if (not isinstance(expected_tokens, list) or
+                            not all(isinstance(token, str) for token in expected_tokens)):
+                        raise ProjectError("expected engine tokens for %s must be strings" % line_id)
+                    if (not isinstance(returned_tokens, list) or
+                            not all(isinstance(token, str) for token in returned_tokens)):
+                        raise ProjectError("returned engine tokens for %s must be strings" % line_id)
+                    review_flags[line_id] = {
+                        "reason": reason or "Engine delimiters differ from the source; review this translation.",
+                        "source": binding.source,
+                        "expected_engine_tokens": expected_tokens,
+                        "returned_engine_tokens": returned_tokens,
+                    }
+                else:
+                    review_flags.pop(line_id, None)
                 if schema == "glossary":
                     key = binding.metadata["key"]
                     document[key] = value
                 else:
                     binding.entry[binding.translation_key] = value
             new_raw = _atomic_json(path, document)
+            if review_flags != original_review_flags:
+                _atomic_json(self.root / PROJECT_REVIEW_FILE, review_flags)
             _raw, _document, new_schema, new_bindings = self._load_path(path)
             return {
                 "path": relative,
                 "schema": new_schema,
                 "token": _token(new_raw),
-                "lines": self._normalized(path, new_schema, new_bindings),
+                "lines": self._normalized(path, new_schema, new_bindings, review_flags),
             }
 
     def load_project_settings(self) -> Dict[str, Any]:

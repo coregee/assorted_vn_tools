@@ -71,8 +71,8 @@ def _engine_tokens(text: str) -> List[str]:
 
 
 def parse_translation_response(raw: str,
-                               expected: Sequence[Mapping[str, Any]]) -> List[Dict[str, str]]:
-    """Strictly validate response structure, ID order, and engine-token preservation."""
+                               expected: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
+    """Validate response structure and flag, rather than reject, token mismatches."""
     text = raw.strip()
     fence = re.fullmatch(r"```(?:json)?\s*(.*?)\s*```", text, re.DOTALL | re.IGNORECASE)
     if fence:
@@ -90,7 +90,7 @@ def parse_translation_response(raw: str,
     if len(rows) != len(expected_ids):
         raise TranslationError("expected %d translations, received %d" %
                                (len(expected_ids), len(rows)))
-    result: List[Dict[str, str]] = []
+    result: List[Dict[str, Any]] = []
     for index, (row, expected_line) in enumerate(zip(rows, expected)):
         if not isinstance(row, dict) or set(row) != {"id", "translation"}:
             raise TranslationError("translation %d must contain only 'id' and 'translation'" % index)
@@ -103,9 +103,18 @@ def parse_translation_response(raw: str,
             raise TranslationError("translation for %s is empty" % row.get("id"))
         source_tokens = _engine_tokens(expected_line["source"])
         translated_tokens = _engine_tokens(translated)
+        parsed_row: Dict[str, Any] = {
+            "id": row["id"],
+            "translation": translated,
+        }
         if translated_tokens != source_tokens:
-            raise TranslationError("translation for %s changed or dropped engine tokens" % row["id"])
-        result.append({"id": row["id"], "translation": translated})
+            parsed_row.update({
+                "flagged": True,
+                "flag_reason": "Engine delimiters differ from the source; review this translation.",
+                "expected_engine_tokens": source_tokens,
+                "returned_engine_tokens": translated_tokens,
+            })
+        result.append(parsed_row)
     return result
 
 
@@ -478,7 +487,7 @@ class TranslationEngine:
             attempt_input = ([dict(request_messages[-1])] if can_continue
                              else [dict(message) for message in request_messages])
             attempt_previous_response_id = previous_response_id if can_continue else None
-            parsed: Optional[List[Dict[str, str]]] = None
+            parsed: Optional[List[Dict[str, Any]]] = None
             repair_attempt = 0
             request_failures = 0
             successful_response_id: Optional[str] = None
@@ -582,6 +591,10 @@ class TranslationEngine:
                     "suggestion": row["translation"],
                     "speaker": line.get("speaker"),
                     "kind": line.get("kind"),
+                    "flagged": bool(row.get("flagged")),
+                    "flag_reason": row.get("flag_reason"),
+                    "expected_engine_tokens": row.get("expected_engine_tokens", []),
+                    "returned_engine_tokens": row.get("returned_engine_tokens", []),
                 })
             if turn_completed:
                 turn_completed(batch.file_path, turn_suggestions)

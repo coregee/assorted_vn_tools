@@ -671,6 +671,11 @@ select:focus {
   font-variant-numeric: tabular-nums;
 }
 
+.file-percent.has-review-flags {
+  color: var(--warning);
+  font-weight: 700;
+}
+
 .empty-list {
   margin: 18px 0;
   color: var(--ink-faint);
@@ -934,6 +939,11 @@ select:focus {
   box-shadow: 0 0 0 2px rgb(40 109 104 / 10%);
 }
 
+.line-card.is-flagged {
+  border-color: #d7ae69;
+  box-shadow: 0 0 0 2px rgb(149 98 26 / 9%);
+}
+
 .line-card.is-dirty::after {
   position: absolute;
   top: 12px;
@@ -992,6 +1002,21 @@ select:focus {
   border-radius: 999px;
   font-size: 10px;
   font-weight: 750;
+}
+
+.review-flag-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 7px;
+  color: var(--warning);
+  background: var(--warning-soft);
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 750;
+}
+
+.review-flag-text {
+  color: var(--warning);
 }
 
 .speaker-badge {
