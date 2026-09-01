@@ -170,10 +170,12 @@
     batch_limit: 8,
     context_window: 32768,
     response_reserve_percent: 20,
+    context_clear_percent: 50,
     allow_remote_lmstudio: false,
   });
 
   const THEME_STORAGE_KEY = "translation-workbench.theme";
+  const LINES_PER_PAGE = 200;
 
   const state = {
     projectPath: "",
@@ -193,6 +195,7 @@
     saving: false,
     fileFilter: "",
     lineFilter: "",
+    linePage: 0,
     loadSequence: 0,
     fileAbortController: null,
   };
@@ -208,9 +211,10 @@
     "active-file-name", "active-file-path", "save-state", "save-button", "selection-count", "select-untranslated",
     "select-all", "select-none", "translate-selected", "translate-untranslated", "translate-file",
     "line-filter", "visible-line-count", "job-panel", "job-title", "job-message", "job-progressbar", "job-progress",
-    "cancel-job", "line-list", "empty-lines", "app-status", "settings-button", "settings-dialog",
+    "cancel-job", "line-list", "empty-lines", "line-pagination", "previous-line-page", "line-page-label",
+    "next-line-page", "app-status", "settings-button", "settings-dialog",
     "settings-form", "setting-base-url", "setting-model", "models-list", "models-status", "setting-target-language",
-    "setting-batch-mode", "setting-batch-limit", "setting-context-window", "setting-response-reserve", "setting-temperature",
+    "setting-batch-mode", "setting-batch-limit", "setting-context-window", "setting-response-reserve", "setting-context-clear", "setting-temperature",
     "setting-enable-thinking", "setting-allow-remote", "setting-game-context", "setting-system-prompt", "load-models", "settings-status",
     "save-default-settings", "save-settings", "theme-toggle", "theme-icon", "shortcuts-button", "shortcuts-dialog",
   ];
@@ -774,6 +778,7 @@
       state.selected.clear();
       state.dirty.clear();
       state.lineFilter = "";
+      state.linePage = 0;
       $("line-filter").value = "";
       renderActiveFile();
       setStatus(`Loaded ${state.activeFile.lines.length} lines from ${baseName(path)}`);
@@ -819,7 +824,11 @@
   function renderLineList() {
     if (!state.activeFile) return;
     const query = state.lineFilter.trim().toLocaleLowerCase();
-    const visibleLines = state.activeFile.lines.filter((line) => lineMatchesFilter(line, query));
+    const matchingLines = state.activeFile.lines.filter((line) => lineMatchesFilter(line, query));
+    const pageCount = Math.max(1, Math.ceil(matchingLines.length / LINES_PER_PAGE));
+    state.linePage = clamp(state.linePage, 0, pageCount - 1);
+    const pageStart = state.linePage * LINES_PER_PAGE;
+    const visibleLines = matchingLines.slice(pageStart, pageStart + LINES_PER_PAGE);
     const fragment = document.createDocumentFragment();
 
     visibleLines.forEach((line, visibleIndex) => {
@@ -901,11 +910,39 @@
     });
 
     $("line-list").replaceChildren(fragment);
-    $("visible-line-count").textContent = query
-      ? `${visibleLines.length} of ${state.activeFile.lines.length} lines`
-      : `${state.activeFile.lines.length} lines`;
-    $("empty-lines").hidden = visibleLines.length > 0;
+    const pageEnd = pageStart + visibleLines.length;
+    if (query) {
+      $("visible-line-count").textContent = matchingLines.length
+        ? `${pageStart + 1}–${pageEnd} of ${matchingLines.length} matches · ${state.activeFile.lines.length} lines total`
+        : `0 matches · ${state.activeFile.lines.length} lines total`;
+    } else if (matchingLines.length > LINES_PER_PAGE) {
+      $("visible-line-count").textContent = `${pageStart + 1}–${pageEnd} of ${matchingLines.length} lines`;
+    } else {
+      $("visible-line-count").textContent = `${matchingLines.length} lines`;
+    }
+    $("empty-lines").hidden = matchingLines.length > 0;
+    document.querySelectorAll(".line-pagination").forEach((pagination) => {
+      pagination.hidden = pageCount <= 1;
+    });
+    document.querySelectorAll(".line-page-label").forEach((label) => {
+      label.textContent = `Page ${state.linePage + 1} of ${pageCount}`;
+    });
+    document.querySelectorAll('[data-line-page-offset="-1"]').forEach((button) => {
+      button.disabled = state.linePage === 0;
+    });
+    document.querySelectorAll('[data-line-page-offset="1"]').forEach((button) => {
+      button.disabled = state.linePage >= pageCount - 1;
+    });
     [...$("line-list").querySelectorAll("textarea")].forEach(autoSizeTextarea);
+  }
+
+  function changeLinePage(offset) {
+    if (!state.activeFile) return;
+    const nextPage = state.linePage + offset;
+    if (nextPage < 0) return;
+    state.linePage = nextPage;
+    renderLineList();
+    $("line-pagination").scrollIntoView({ block: "start" });
   }
 
   function autoSizeTextarea(textarea) {
@@ -1080,6 +1117,7 @@
       batch_limit: numeric("setting-batch-limit", DEFAULT_SETTINGS.batch_limit),
       context_window: numeric("setting-context-window", DEFAULT_SETTINGS.context_window),
       response_reserve_percent: numeric("setting-response-reserve", DEFAULT_SETTINGS.response_reserve_percent),
+      context_clear_percent: numeric("setting-context-clear", DEFAULT_SETTINGS.context_clear_percent),
       allow_remote_lmstudio: $("setting-allow-remote").checked,
     };
   }
@@ -1101,6 +1139,7 @@
     $("setting-batch-limit").value = settings.batch_limit ?? DEFAULT_SETTINGS.batch_limit;
     $("setting-context-window").value = settings.context_window ?? DEFAULT_SETTINGS.context_window;
     $("setting-response-reserve").value = settings.response_reserve_percent ?? DEFAULT_SETTINGS.response_reserve_percent;
+    $("setting-context-clear").value = settings.context_clear_percent ?? DEFAULT_SETTINGS.context_clear_percent;
     $("setting-allow-remote").checked = Boolean(settings.allow_remote_lmstudio);
     $("settings-status").textContent = "";
   }
@@ -1227,6 +1266,7 @@
       batch_limit: settings.batch_limit,
       context_window: settings.context_window,
       response_reserve_percent: settings.response_reserve_percent,
+      context_clear_percent: settings.context_clear_percent,
       allow_remote_lmstudio: settings.allow_remote_lmstudio,
     };
     if (lineIds !== undefined) payload.line_ids = lineIds;
@@ -1577,7 +1617,11 @@
     $("translate-files").addEventListener("click", () => startTranslation("files"));
     $("line-filter").addEventListener("input", (event) => {
       state.lineFilter = event.target.value;
+      state.linePage = 0;
       renderLineList();
+    });
+    document.querySelectorAll("[data-line-page-offset]").forEach((button) => {
+      button.addEventListener("click", () => changeLinePage(Number(button.dataset.linePageOffset)));
     });
 
     $("line-list").addEventListener("change", (event) => {

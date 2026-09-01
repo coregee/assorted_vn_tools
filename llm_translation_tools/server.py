@@ -60,6 +60,7 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "batch_limit": 8,
     "context_window": 32768,
     "response_reserve_percent": 20,
+    "context_clear_percent": 50,
     "allow_remote_lmstudio": False,
 }
 
@@ -191,7 +192,8 @@ class SettingsStore:
         for key, minimum, maximum in (
                 ("batch_limit", 1, 1000000),
                 ("context_window", 1024, 1048576),
-                ("response_reserve_percent", 5, 50)):
+                ("response_reserve_percent", 5, 50),
+                ("context_clear_percent", 0, 100)):
             value = result.get(key)
             if isinstance(value, bool) or not isinstance(value, int):
                 raise APIError(400, "%s must be an integer" % key)

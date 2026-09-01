@@ -6,6 +6,8 @@ from llm_translation_tools.lmstudio import LMStudioCompletion, LMStudioError
 from llm_translation_tools.translator import (
     TranslationEngine,
     TranslationError,
+    _trim_old_turns,
+    estimate_message_tokens,
     parse_translation_response,
 )
 
@@ -21,6 +23,7 @@ SETTINGS = {
     "batch_limit": 1,
     "context_window": 8192,
     "response_reserve_percent": 25,
+    "context_clear_percent": 50,
 }
 
 
@@ -141,6 +144,68 @@ class ResponseValidationTests(unittest.TestCase):
 
 
 class TranslationCycleTests(unittest.TestCase):
+    def test_context_clear_percent_targets_usable_prompt_budget(self):
+        messages = [{"role": "system", "content": "system"}]
+        for index in range(4):
+            messages.extend([
+                {"role": "user", "content": "u%d%s" % (index, "x" * 98)},
+                {"role": "assistant", "content": "a%d%s" % (index, "y" * 98)},
+            ])
+        messages.append({"role": "user", "content": "current" + "z" * 93})
+        prompt_limit = 900
+
+        minimal = _trim_old_turns(
+            messages, prompt_limit, preserve_tail=1, clear_percent=0)
+        half_clear = _trim_old_turns(
+            messages, prompt_limit, preserve_tail=1, clear_percent=50)
+
+        self.assertLessEqual(estimate_message_tokens(minimal), prompt_limit)
+        self.assertGreater(estimate_message_tokens(minimal), prompt_limit // 2)
+        self.assertLessEqual(estimate_message_tokens(half_clear), prompt_limit // 2)
+        self.assertEqual(["system", "user", "assistant", "user"], [
+            message["role"] for message in half_clear
+        ])
+        self.assertIn("u3", half_clear[1]["content"])
+
+        forced_minimal = _trim_old_turns(
+            messages, 1500, preserve_tail=1, clear_percent=0, force=True)
+        forced_half_clear = _trim_old_turns(
+            messages, 1500, preserve_tail=1, clear_percent=50, force=True)
+        self.assertEqual(len(messages) - 2, len(forced_minimal))
+        self.assertLessEqual(estimate_message_tokens(forced_half_clear), 750)
+
+    def test_context_replay_resumes_stateful_continuation_after_half_clear(self):
+        path = "script/a.json"
+        lines = [
+            line(path, index, chr(0x4e00 + index) * 100)
+            for index in range(5)
+        ]
+        client = StatefulRecordingClient([
+            (response_for(str(index)), "resp_%d" % index)
+            for index in range(5)
+        ])
+
+        TranslationEngine(client).translate(
+            [{"path": path, "lines": lines}],
+            {
+                **SETTINGS,
+                "context_window": 4000,
+                "response_reserve_percent": 25,
+                "context_clear_percent": 50,
+            },
+        )
+
+        self.assertEqual(
+            [None, "resp_0", "resp_1", None, "resp_3"],
+            [call["previous_response_id"] for call in client.calls],
+        )
+        self.assertEqual(["system", "user"], [
+            message["role"] for message in client.calls[3]["messages"]
+        ])
+        self.assertEqual(["user"], [
+            message["role"] for message in client.calls[4]["messages"]
+        ])
+
     def test_changed_engine_tokens_are_saved_and_flagged_without_retry(self):
         target = line("script/a.json", 0, "待って\\x81")
         client = RecordingClient([response_for("Wait")])
@@ -471,6 +536,31 @@ class TranslationCycleTests(unittest.TestCase):
             [message["role"] for message in client.calls[1]["messages"]],
         )
         self.assertIn("previous response was invalid", client.calls[1]["messages"][-1]["content"])
+
+    def test_short_window_discards_retry_chatter_instead_of_failing(self):
+        target = line("script/a.json", 0, "短い台詞")
+        client = StatefulRecordingClient([
+            ("not json", "resp_invalid"),
+            (response_for("A short line."), "resp_valid"),
+        ])
+        settings = {
+            **SETTINGS,
+            "context_window": 1024,
+            "response_reserve_percent": 20,
+        }
+
+        result = TranslationEngine(client).translate(
+            [{"path": "script/a.json", "lines": [target]}], settings
+        )
+
+        self.assertEqual("A short line.", result[0]["suggestion"])
+        self.assertEqual(["system", "user"], [
+            message["role"] for message in client.calls[1]["messages"]
+        ])
+        self.assertIn("PREVIOUS RESPONSE INVALID", client.calls[1]["messages"][-1]["content"])
+        self.assertNotIn("not json", client.calls[1]["messages"][-1]["content"])
+        self.assertIsNone(client.calls[1]["previous_response_id"])
+        self.assertEqual(204, client.calls[1]["max_tokens"])
 
     def test_timeout_retries_the_same_turn_before_committing(self):
         target = line("script/a.json", 0, "こんにちは")

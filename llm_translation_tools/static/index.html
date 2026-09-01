@@ -166,6 +166,12 @@
           <span id="visible-line-count" aria-live="polite"></span>
         </div>
 
+        <nav class="line-pagination" id="line-pagination" aria-label="Script line pages" hidden>
+          <button class="button button-secondary" id="previous-line-page" data-line-page-offset="-1" type="button">Previous</button>
+          <span class="line-page-label" id="line-page-label" aria-live="polite">Page 1 of 1</span>
+          <button class="button button-secondary" id="next-line-page" data-line-page-offset="1" type="button">Next</button>
+        </nav>
+
         <section class="job-panel" id="job-panel" aria-live="polite" hidden>
           <div class="job-heading">
             <div>
@@ -184,6 +190,11 @@
           <strong>No lines found</strong>
           <p>Try clearing the line filter or choose another script.</p>
         </div>
+        <nav class="line-pagination" aria-label="Script line pages" hidden>
+          <button class="button button-secondary" data-line-page-offset="-1" type="button">Previous</button>
+          <span class="line-page-label" aria-live="polite">Page 1 of 1</span>
+          <button class="button button-secondary" data-line-page-offset="1" type="button">Next</button>
+        </nav>
       </div>
     </section>
 
@@ -254,6 +265,11 @@
               <span>Response reserve</span>
               <input id="setting-response-reserve" name="response_reserve_percent" type="number" min="5" max="50" step="1" required>
               <small>Percentage of the context window kept free for each response.</small>
+            </label>
+            <label class="field">
+              <span>Context clear on overflow</span>
+              <input id="setting-context-clear" name="context_clear_percent" type="number" min="0" max="100" step="1" required>
+              <small>Percentage of the usable prompt budget cleared when full; the system and current turn stay. Use 0 for minimal trimming.</small>
             </label>
             <label class="field">
               <span>Temperature</span>

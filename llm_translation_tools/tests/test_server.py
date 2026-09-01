@@ -133,10 +133,18 @@ class ServerIntegrationTests(unittest.TestCase):
         self.assertIn(b'id="extract-button"', html)
         self.assertIn(b'id="repack-button"', html)
         self.assertIn(b'id="theme-toggle"', html)
+        self.assertIn(b'id="setting-context-clear"', html)
+        self.assertIn(b'id="line-pagination"', html)
+        self.assertIn(b'id="previous-line-page"', html)
+        self.assertIn(b'id="next-line-page"', html)
         self.assertIn("default-src 'self'", headers["Content-Security-Policy"])
         self.assertEqual(200, self.request("/theme.js")[0])
         self.assertEqual(200, self.request("/styles.css")[0])
-        self.assertEqual(200, self.request("/app.js")[0])
+        app_status, app, _app_headers = self.request("/app.js")
+        self.assertEqual(200, app_status)
+        self.assertIn(b"const LINES_PER_PAGE = 200", app)
+        self.assertIn(b"context_clear_percent: 50", app)
+        self.assertIn(b"matchingLines.slice(pageStart, pageStart + LINES_PER_PAGE)", app)
 
         opened = self.open_project()
         self.assertEqual(str(self.root), opened["project"]["root"])
@@ -323,6 +331,7 @@ class ServerIntegrationTests(unittest.TestCase):
                 "batch_limit": 200,
                 "context_window": 65536,
                 "response_reserve_percent": 15,
+                "context_clear_percent": 40,
                 "enable_thinking": False,
             },
         )
@@ -330,7 +339,12 @@ class ServerIntegrationTests(unittest.TestCase):
         self.assertEqual(200, settings["batch_limit"])
         self.assertEqual(65536, settings["context_window"])
         self.assertEqual(15, settings["response_reserve_percent"])
+        self.assertEqual(40, settings["context_clear_percent"])
         self.assertFalse(settings["enable_thinking"])
+        project_settings = json.loads(
+            (self.root / ".llm_translation_tools.settings").read_text(encoding="utf-8")
+        )
+        self.assertEqual(40, project_settings["context_clear_percent"])
 
         status, payload = self.error(
             "/api/settings",
@@ -351,6 +365,14 @@ class ServerIntegrationTests(unittest.TestCase):
         status, payload = self.error(
             "/api/settings",
             "PUT",
+            {"context_clear_percent": 101},
+        )
+        self.assertEqual(400, status)
+        self.assertIn("between 0 and 100", payload["error"]["message"])
+
+        status, payload = self.error(
+            "/api/settings",
+            "PUT",
             {"batch_mode": "tokens"},
         )
         self.assertEqual(400, status)
@@ -365,6 +387,7 @@ class ServerIntegrationTests(unittest.TestCase):
                 "target_language": "French",
                 "game_context": "Default terminology.",
                 "context_window": 65536,
+                "context_clear_percent": 35,
             },
         )
         self.assertEqual(str(self.defaults_path), saved["path"])
@@ -376,6 +399,7 @@ class ServerIntegrationTests(unittest.TestCase):
         self.assertEqual("default-model", reloaded["model"])
         self.assertEqual("Default terminology.", reloaded["game_context"])
         self.assertEqual(65536, reloaded["context_window"])
+        self.assertEqual(35, reloaded["context_clear_percent"])
 
         future_root = Path(self.temporary.name) / "future game"
         future_script = future_root / "script"

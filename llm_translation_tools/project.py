@@ -24,7 +24,8 @@ PROJECT_SETTINGS_FILE = ".llm_translation_tools.settings"
 PROJECT_REVIEW_FILE = ".llm_translation_tools.review"
 PROJECT_SETTING_KEYS = frozenset(
     ("system_prompt", "game_context", "target_language", "model", "enable_thinking", "temperature",
-     "context_window", "response_reserve_percent", "batch_mode", "batch_limit")
+     "context_window", "response_reserve_percent", "context_clear_percent",
+     "batch_mode", "batch_limit")
 )
 
 

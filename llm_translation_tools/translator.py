@@ -307,16 +307,31 @@ def response_token_budget(context_window: int, reserve_percent: int) -> int:
 
 
 def _trim_old_turns(messages: Sequence[Mapping[str, str]], prompt_limit: int,
-                    preserve_tail: int) -> List[Dict[str, str]]:
-    """Drop oldest complete user/assistant turns while preserving the system and tail."""
+                    preserve_tail: int, clear_percent: int = 0,
+                    force: bool = False) -> List[Dict[str, str]]:
+    """Clear oldest complete turns to a target below the usable prompt budget.
+
+    Trimming begins only after the prompt exceeds ``prompt_limit`` unless ``force`` is
+    true because the model reported an overflow despite the local estimate. A zero
+    clear percentage preserves the former behavior: remove only enough history for the
+    request to fit. Higher values create headroom for subsequent stateful turns.
+    """
     if not messages:
         return []
     system = dict(messages[0])
     tail_start = max(1, len(messages) - preserve_tail)
     history = [dict(message) for message in messages[1:tail_start]]
     required = [dict(message) for message in messages[tail_start:]]
-    while history and estimate_message_tokens([system] + history + required) > prompt_limit:
+    fitted = [system] + history + required
+    if not force and estimate_message_tokens(fitted) <= prompt_limit:
+        return fitted
+
+    target_limit = prompt_limit * (100 - clear_percent) // 100
+    dropped = False
+    while history and (not dropped or estimate_message_tokens(
+            [system] + history + required) > target_limit):
         del history[:min(2, len(history))]
+        dropped = True
     fitted = [system] + history + required
     if estimate_message_tokens(fitted) > prompt_limit:
         raise TranslationError(
@@ -326,24 +341,57 @@ def _trim_old_turns(messages: Sequence[Mapping[str, str]], prompt_limit: int,
     return fitted
 
 
-def _drop_oldest_complete_turn(messages: Sequence[Mapping[str, str]],
-                               preserve_tail: int) -> Optional[List[Dict[str, str]]]:
-    """Drop one oldest user/assistant pair while preserving the system and active turn."""
-    if not messages:
+def _clear_oldest_complete_turns(messages: Sequence[Mapping[str, str]],
+                                 prompt_limit: int, preserve_tail: int,
+                                 clear_percent: int,
+                                 ) -> Optional[List[Dict[str, str]]]:
+    """Clear replay history after a model-reported context overflow."""
+    trimmed = _trim_old_turns(
+        messages, prompt_limit, preserve_tail, clear_percent, force=True)
+    if trimmed == list(messages):
         return None
-    tail_start = max(1, len(messages) - preserve_tail)
-    history = [dict(message) for message in messages[1:tail_start]]
-    if (len(history) < 2 or history[0].get("role") != "user" or
-            history[1].get("role") != "assistant"):
-        return None
-    return ([dict(messages[0])] + history[2:] +
-            [dict(message) for message in messages[tail_start:]])
+    return trimmed
+
+
+def _compact_repair_replay(messages: Sequence[Mapping[str, str]],
+                           prompt_limit: int, expected_count: int,
+                           clear_percent: int,
+                           ) -> List[Dict[str, str]]:
+    """Replay the active turn without retaining an oversized invalid response.
+
+    The normal repair branch includes the model's invalid output and a follow-up user
+    message. Those are retry chatter, not required translation context, and together
+    can exceed a small window even when the system prompt and active turn fit. Replace
+    the active turn's redundant response-format footer with a shorter correction and
+    restart from as much canonical file history as still fits.
+    """
+    replay = _trim_old_turns(
+        messages, prompt_limit, preserve_tail=1, clear_percent=clear_percent)
+    active = dict(replay[-1])
+    content = active.get("content", "")
+    if "\n\n" in content:
+        content = content.rsplit("\n\n", 1)[0]
+    noun = "string" if expected_count == 1 else "strings"
+    active["content"] = (
+        content.rstrip() +
+        "\n\nPREVIOUS RESPONSE INVALID. Return only a valid JSON array containing "
+        "exactly %d non-empty translation %s in TARGET order. Preserve every engine "
+        "token verbatim." % (expected_count, noun)
+    )
+    compact = replay[:-1] + [active]
+    # The replacement footer is intentionally shorter than the standard one. Retain a
+    # defensive fallback so a future prompt change cannot turn repair setup into a hard
+    # context-window failure.
+    if estimate_message_tokens(compact) > prompt_limit:
+        return replay
+    return compact
 
 
 def fit_batch_request(history: Sequence[Mapping[str, str]], batch: TranslationBatch,
                       context_start: int, suggested: Mapping[str, str],
                       glossary: Optional[Mapping[str, str]],
-                      prompt_limit: int) -> List[Dict[str, str]]:
+                      prompt_limit: int, clear_percent: int = 0,
+                      ) -> List[Dict[str, str]]:
     """Fit a chronological batch turn, trimming oldest turns and reference lines first."""
     user_content = batch_prompt(batch, context_start, suggested, glossary)
     candidate = [dict(message) for message in history] + [
@@ -352,7 +400,9 @@ def fit_batch_request(history: Sequence[Mapping[str, str]], batch: TranslationBa
 
     # Previous completed turns are older than every line in this new turn.
     try:
-        return _trim_old_turns(candidate, prompt_limit, preserve_tail=1)
+        return _trim_old_turns(
+            candidate, prompt_limit, preserve_tail=1,
+            clear_percent=clear_percent)
     except TranslationError:
         pass
 
@@ -441,6 +491,7 @@ class TranslationEngine:
             return []
         context_window = int(settings["context_window"])
         reserve_percent = int(settings["response_reserve_percent"])
+        clear_percent = int(settings.get("context_clear_percent", 50))
         max_tokens = response_token_budget(context_window, reserve_percent)
         prompt_limit = context_window - max_tokens
         batches = make_batches(
@@ -482,7 +533,8 @@ class TranslationEngine:
                 current_file = batch.file_path
                 context_start = 0
             request_messages = fit_batch_request(
-                history, batch, context_start, suggested, glossary, prompt_limit)
+                history, batch, context_start, suggested, glossary, prompt_limit,
+                clear_percent)
             can_continue = (
                 previous_response_id is not None and
                 request_messages[:-1] == history
@@ -514,8 +566,9 @@ class TranslationEngine:
                         continue
                     if _context_overflow_lmstudio_error(error):
                         preserve_tail = 3 if repair_attempt else 1
-                        trimmed = _drop_oldest_complete_turn(
-                            attempt_messages, preserve_tail)
+                        trimmed = _clear_oldest_complete_turns(
+                            attempt_messages, prompt_limit, preserve_tail,
+                            clear_percent)
                         if trimmed is not None:
                             attempt_messages = trimmed
                             if repair_attempt:
@@ -557,18 +610,32 @@ class TranslationEngine:
                         {"role": "assistant", "content": raw},
                         {"role": "user", "content": repair},
                     ]
-                    attempt_messages = _trim_old_turns(
-                        repair_candidate, prompt_limit, preserve_tail=3)
-                    repair_trimmed = attempt_messages != repair_candidate
-                    request_messages = attempt_messages[:-2]
-                    # The first repair can branch directly from the invalid response. Later
-                    # repairs restart from canonical history so retry chatter does not grow.
-                    if response_id is not None and repair_attempt == 1 and not repair_trimmed:
-                        attempt_input = [{"role": "user", "content": repair}]
-                        attempt_previous_response_id = response_id
-                    else:
+                    try:
+                        attempt_messages = _trim_old_turns(
+                            repair_candidate, prompt_limit, preserve_tail=3,
+                            clear_percent=clear_percent)
+                    except TranslationError:
+                        # The canonical current turn already fit. If retry chatter does not,
+                        # discard it and replay a compact corrected version of this turn.
+                        attempt_messages = _compact_repair_replay(
+                            request_messages, prompt_limit, len(batch.targets),
+                            clear_percent)
+                        request_messages = attempt_messages
                         attempt_input = [dict(message) for message in attempt_messages]
                         attempt_previous_response_id = None
+                    else:
+                        repair_trimmed = attempt_messages != repair_candidate
+                        request_messages = attempt_messages[:-2]
+                        # The first repair can branch directly from the invalid response.
+                        # Later repairs restart from canonical history so retry chatter does
+                        # not grow.
+                        if (response_id is not None and repair_attempt == 1 and
+                                not repair_trimmed):
+                            attempt_input = [{"role": "user", "content": repair}]
+                            attempt_previous_response_id = response_id
+                        else:
+                            attempt_input = [dict(message) for message in attempt_messages]
+                            attempt_previous_response_id = None
                     continue
 
                 # Future context only needs the valid canonical turn, not retry chatter.

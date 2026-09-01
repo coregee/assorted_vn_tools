@@ -985,6 +985,26 @@ select:focus {
   margin-top: 16px;
 }
 
+.line-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  margin-top: 20px;
+}
+
+.line-pagination[hidden] {
+  display: none;
+}
+
+.line-pagination span {
+  min-width: 88px;
+  color: var(--ink-soft);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
 .line-card {
   position: relative;
   display: grid;

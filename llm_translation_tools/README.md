@@ -80,8 +80,15 @@ the next request begins. The editor reloads those committed translations as
 job progress advances. LM Studio's stateful `/v1/responses` endpoint stores the
 active conversation, so after the first request each normal request sends only
 the new user turn with `previous_response_id`. The complete local transcript is
-still retained for validation, recovery, and context trimming. Within a file,
-translation runs in chronological conversation turns using:
+still retained for validation, recovery, and context trimming. The response
+reserve is subtracted from the model context window first. When the next turn
+would overflow the remaining prompt budget, the oldest complete turns are
+cleared until the retained prompt reaches the configured target. The default
+50% clear setting targets half of the usable prompt budget while always keeping
+the system message and current turn; 0% keeps the former behavior of trimming
+only enough to fit. Stateful continuation then resumes from that shorter
+transcript and fills the context again. Within a file, translation runs in
+chronological conversation turns using:
 
 For Etutane, one message is an actual displayed dialogue/narration page. Its
 physical Japanese rows are joined without line breaks before being sent to the
