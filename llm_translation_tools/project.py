@@ -86,6 +86,33 @@ def _atomic_json(path: Path, document: Any) -> bytes:
     return raw
 
 
+def _review_flag_items(flag: Mapping[str, Any]) -> List[Dict[str, Any]]:
+    nested = flag.get("flags")
+    if isinstance(nested, list):
+        return [dict(item) for item in nested if isinstance(item, Mapping)]
+    return [dict(flag)]
+
+
+def _packed_review_flags(flags: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
+    packed = [dict(flag) for flag in flags]
+    return packed[0] if len(packed) == 1 else {"flags": packed}
+
+
+def _display_review_flag(flag: Mapping[str, Any], source: str) -> Optional[Dict[str, Any]]:
+    items = [item for item in _review_flag_items(flag)
+             if item.get("source") in (None, source)]
+    if not items:
+        return None
+    if len(items) == 1:
+        return items[0]
+    return {
+        "category": "multiple",
+        "reason": "\n".join(item.get("reason", "Review this translation.") for item in items),
+        "source": source,
+        "flags": items,
+    }
+
+
 @dataclass
 class _Binding:
     pointer: str
@@ -334,6 +361,78 @@ class Project:
             if isinstance(line_id, str) and isinstance(flag, Mapping)
         }
 
+    def replace_review_flags(self, category: str,
+                             issues: Sequence[Mapping[str, Any]]) -> int:
+        """Replace one category of sidecar review flags without touching script JSON.
+
+        Repackers identify entries by their project-relative JSON path and normalized
+        JSON pointer. Other review categories (for example engine-token mismatches)
+        remain intact. Returns the number of current lines flagged by ``issues``.
+        """
+        if not isinstance(category, str) or not category.strip():
+            raise ProjectError("review flag category is required")
+        if not isinstance(issues, list):
+            raise ProjectError("review issues must be a JSON array")
+        with self._lock:
+            review_flags = self._load_review_flags()
+            original_review_flags = dict(review_flags)
+            retained_flags: Dict[str, Dict[str, Any]] = {}
+            for line_id, stored in review_flags.items():
+                retained = [flag for flag in _review_flag_items(stored)
+                            if flag.get("category") != category]
+                if retained:
+                    retained_flags[line_id] = _packed_review_flags(retained)
+            review_flags = retained_flags
+            grouped: Dict[str, Dict[str, Any]] = {}
+            issues_by_path: Dict[str, List[Mapping[str, Any]]] = {}
+            for issue in issues:
+                if not isinstance(issue, Mapping):
+                    raise ProjectError("each review issue must be an object")
+                relative_path = issue.get("path")
+                pointer = issue.get("pointer")
+                reason = issue.get("reason")
+                if not isinstance(relative_path, str) or not relative_path:
+                    raise ProjectError("review issue path is required")
+                if not isinstance(pointer, str) or not pointer.startswith("/"):
+                    raise ProjectError("review issue pointer is invalid")
+                if not isinstance(reason, str) or not reason.strip():
+                    raise ProjectError("review issue reason is required")
+                details = issue.get("details")
+                if details is not None and not isinstance(details, Mapping):
+                    raise ProjectError("review issue details must be an object")
+                issues_by_path.setdefault(relative_path, []).append(issue)
+            for relative_path, file_issues in issues_by_path.items():
+                path = self.resolve_file(relative_path)
+                _raw, _document, _schema, bindings = self._load_path(path)
+                by_pointer = {binding.pointer: binding for binding in bindings}
+                for issue in file_issues:
+                    pointer = issue["pointer"]
+                    reason = issue["reason"].strip()
+                    binding = by_pointer.get(pointer)
+                    if binding is None:
+                        raise ProjectError("review issue points to an unknown line: %s#%s" %
+                                           (relative_path, pointer))
+                    line_id = self._relative(path) + "#" + pointer
+                    current = grouped.get(line_id)
+                    if current is None:
+                        current = {
+                            "category": category,
+                            "reason": reason,
+                            "source": binding.source,
+                        }
+                        details = issue.get("details")
+                        if details:
+                            current["details"] = dict(details)
+                        grouped[line_id] = current
+                    elif reason not in current["reason"].split("\n"):
+                        current["reason"] += "\n" + reason
+            for line_id, flag in grouped.items():
+                retained = _review_flag_items(review_flags[line_id]) if line_id in review_flags else []
+                review_flags[line_id] = _packed_review_flags(retained + [flag])
+            if review_flags != original_review_flags:
+                _atomic_json(self.root / PROJECT_REVIEW_FILE, review_flags)
+            return len(grouped)
+
     def _normalized(self, path: Path, schema: str, bindings: Sequence[_Binding],
                     review_flags: Optional[Mapping[str, Mapping[str, Any]]] = None,
                     ) -> List[Dict[str, Any]]:
@@ -341,9 +440,9 @@ class Project:
         lines: List[Dict[str, Any]] = []
         for index, binding in enumerate(bindings):
             line_id = relative + "#" + binding.pointer
-            review_flag = (review_flags or {}).get(line_id)
-            if review_flag and review_flag.get("source") not in (None, binding.source):
-                review_flag = None
+            stored_review_flag = (review_flags or {}).get(line_id)
+            review_flag = (_display_review_flag(stored_review_flag, binding.source)
+                           if stored_review_flag else None)
             lines.append({
                 "id": line_id,
                 "index": index,
@@ -390,10 +489,10 @@ class Project:
                     "translated_count": sum(line.translatable and line.translation_active
                                               for line in bindings),
                     "flagged_count": sum(
-                        bool(review_flags.get(relative + "#" + line.pointer)) and
-                        review_flags[relative + "#" + line.pointer].get("source") in
-                        (None, line.source)
-                        for line in bindings),
+                        _display_review_flag(review_flags[relative + "#" + line.pointer], line.source)
+                        is not None
+                        for line in bindings
+                        if relative + "#" + line.pointer in review_flags),
                     "token": _token(raw),
                 })
         return files
@@ -460,12 +559,17 @@ class Project:
                     if (not isinstance(returned_tokens, list) or
                             not all(isinstance(token, str) for token in returned_tokens)):
                         raise ProjectError("returned engine tokens for %s must be strings" % line_id)
-                    review_flags[line_id] = {
+                    delimiter_flag = {
+                        "category": "engine_delimiters",
                         "reason": reason or "Engine delimiters differ from the source; review this translation.",
                         "source": binding.source,
                         "expected_engine_tokens": expected_tokens,
                         "returned_engine_tokens": returned_tokens,
                     }
+                    retained = [flag for flag in _review_flag_items(review_flags[line_id])
+                                if flag.get("category") != "engine_delimiters"] \
+                               if line_id in review_flags else []
+                    review_flags[line_id] = _packed_review_flags(retained + [delimiter_flag])
                 else:
                     review_flags.pop(line_id, None)
                 if schema == "glossary":

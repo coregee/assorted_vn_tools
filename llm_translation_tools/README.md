@@ -63,6 +63,10 @@ open a known folder immediately at launch.
 8. Inspect the translated JSON and use **Repack scripts** to run the matching
    toolset against the selected game folder. The workbench saves pending edits
    first and asks for confirmation before the repacker writes rebuilt game data.
+   After repacking, every translation reported as truncated or unable to fit is
+   flagged in the editor with the repacker's reason. Edit and save the line to clear
+   its flag, then repack again. These flags live in `.llm_translation_tools.review`,
+   not in the native game JSON.
 
 The editor also supports direct manual editing, source/translation search,
 speaker-name glossary files, protected non-translatable records, optimistic

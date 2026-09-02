@@ -11,7 +11,10 @@ extract: each non-ASCII run -> a script/<file>.json entry { line, seg, key, orig
   Script-variable-name keys (pageNumberVarName / voiceNameChangeVar1) get a `note` and are
   never translated -- doing so breaks the engine's variable lookup ("var not found" at boot).
 build: rebuild from .orig, substituting non-null SJIS-encodable "translated" runs, re-encode
-  (+XOR for .fxf). charaname/namecol fall back to names.json. All-null build is byte-identical.
+  (+XOR for .fxf). names.json is authoritative for charaname/namecol, whose local
+  translations are only fallbacks. config.fxf values are single whitespace-delimited
+  tokens, so translations containing ASCII whitespace are rejected. All-null build is
+  byte-identical.
 
 Usage: python libraries/uitext.py {extract|build} --game DIR
 """
@@ -102,14 +105,21 @@ def build(game=DEFAULT_GAME):
         json_path = os.path.join(JSON_DIR, os.path.splitext(name)[0] + ".json")
         entries = json.load(open(json_path, encoding="utf-8"))
         applied = 0
-        # resolve: explicit per-segment translation wins, then the name glossary
+        # Keep scenario names and the engine's name lookup tables identical. The shared
+        # glossary is authoritative; a local UI translation is only a fallback for names
+        # absent from (or left null in) names.json.
         by_line = {}
         for e in entries:
             if PROTECT_KEY.search(e.get("key", "")):
                 continue  # script variable name: keep the original, never translate
-            if e["translated"] is None and use_names:
-                e = dict(e, translated=name_map.get(e["original"]))
+            if use_names and name_map.get(e["original"]) is not None:
+                e = dict(e, translated=name_map[e["original"]])
             if e["translated"] is not None:
+                if name == "config.fxf" and any(c in " \t\r\n" for c in e["translated"]):
+                    raise SystemExit(
+                        f"{name} line {e['line']}: translation contains ASCII whitespace; "
+                        "FXF values must be a single token"
+                    )
                 by_line.setdefault(e["line"], []).append(e)
         for ln, todo in by_line.items():
             body = lines[ln - 1]

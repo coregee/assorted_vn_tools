@@ -345,7 +345,7 @@ def _rebuild_scenario(root, scen):
           % (os.path.basename(data), os.path.basename(toc), len(re_entries), bad,
              "OK" if bad == 0 else "FAIL"))
 
-def do_repack(root, sel=None, cols=scenetext.LINE_COLS):
+def do_repack(root, sel=None, cols=scenetext.LINE_COLS, review_report=None):
     """Rebuild the selected content (default: scripts) back into the game archives.
     Image/audio archives are only rewritten if an edited/replaced file is detected."""
     root = resolve_dir(root)
@@ -359,7 +359,8 @@ def do_repack(root, sel=None, cols=scenetext.LINE_COLS):
         for f in os.listdir(patched):
             os.remove(_p(patched, f))
         print("[scripts] building from %s\\ ..." % SCRIPT_DIR)
-        scenetext.build(_p(root, SCRIPT_DIR), _p(root, SCEN_ORIG), patched, names_path(root), cols=cols)
+        scenetext.build(_p(root, SCRIPT_DIR), _p(root, SCEN_ORIG), patched,
+                        names_path(root), cols=cols, review_report=review_report)
         _rebuild_scenario(root, arcs["scenario"])
 
     if "image" in sel and arcs.get("image"):

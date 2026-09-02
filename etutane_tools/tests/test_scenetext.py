@@ -110,6 +110,51 @@ class SceneTextPageTests(unittest.TestCase):
             self.assertEqual(3, len(strings))
             self.assertEqual(scenetext.PAGE_ADVANCE, records[-1][1])
 
+    def test_build_reports_every_truncated_page_by_editor_pointer(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            original, scripts, output = root / "original", root / "script", root / "output"
+            original.mkdir()
+            scripts.mkdir()
+            source = blob(source_string("一行目"), scenetext.PAGE_ADVANCE,
+                          source_string("二行目"), scenetext.PAGE_ADVANCE)
+            (original / "scene.a0").write_bytes(source)
+            (scripts / "scene.json").write_text(json.dumps({
+                "file": "scene.a0",
+                "lines": [
+                    {
+                        "i": 0,
+                        "string_indices": [0],
+                        "kind": "dialogue",
+                        "jp": "一行目",
+                        "jp_lines": ["一行目"],
+                        "translated": "one two three four five six seven eight nine ten eleven twelve",
+                    },
+                    {
+                        "i": 1,
+                        "string_indices": [1],
+                        "kind": "dialogue",
+                        "jp": "二行目",
+                        "jp_lines": ["二行目"],
+                        "translated": "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda",
+                    },
+                ],
+            }), encoding="utf-8")
+            names = root / "names.json"
+            names.write_text("{}", encoding="utf-8")
+            report = root / "review.json"
+
+            scenetext.build(str(scripts), str(original), str(output), str(names),
+                            cols=10, review_report=str(report))
+
+            payload = json.loads(report.read_text(encoding="utf-8"))
+            self.assertEqual(1, payload["version"])
+            self.assertEqual(2, len(payload["issues"]))
+            self.assertEqual("script/scene.json", payload["issues"][0]["path"])
+            self.assertEqual("/lines/0", payload["issues"][0]["pointer"])
+            self.assertEqual("/lines/1", payload["issues"][1]["pointer"])
+            self.assertTrue(payload["issues"][0]["details"]["dropped_text"])
+
 
 if __name__ == "__main__":
     unittest.main()

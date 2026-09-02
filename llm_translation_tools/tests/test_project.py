@@ -186,6 +186,33 @@ class ProjectAdapterTests(unittest.TestCase):
         )
         self.assertIsNone(cleared["lines"][0]["review_flag"])
 
+    def test_repack_flags_coexist_with_delimiter_flags_and_replace_by_category(self):
+        snapshot = self.project.read_file("script/etutane.json")
+        line = snapshot["lines"][0]
+        count = self.project.replace_review_flags("repack_overflow", [{
+            "path": snapshot["path"],
+            "pointer": "/lines/0",
+            "reason": "Repack truncated this translation.",
+            "details": {"dropped_text": "tail"},
+        }])
+        self.assertEqual(1, count)
+        flagged = self.project.read_file(snapshot["path"])
+        self.assertEqual("repack_overflow", flagged["lines"][0]["review_flag"]["category"])
+
+        combined = self.project.update_file(
+            snapshot["path"], snapshot["token"], [{
+                "id": line["id"],
+                "translation": "Good morning.",
+                "flagged": True,
+                "flag_reason": "Engine delimiters differ from the source.",
+            }])
+        self.assertEqual("multiple", combined["lines"][0]["review_flag"]["category"])
+        self.assertEqual(2, len(combined["lines"][0]["review_flag"]["flags"]))
+
+        self.project.replace_review_flags("repack_overflow", [])
+        remaining = self.project.read_file(snapshot["path"])["lines"][0]["review_flag"]
+        self.assertEqual("engine_delimiters", remaining["category"])
+
     def test_paths_are_confined_to_script_workspace(self):
         outside = self.base / "outside.json"
         write_json(outside, [{"message": "outside", "translated": None}])

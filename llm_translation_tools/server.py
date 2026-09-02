@@ -449,6 +449,8 @@ class ToolJob:
     output: str = ""
     returncode: Optional[int] = None
     error: Optional[str] = None
+    flagged_count: int = 0
+    review_error: Optional[str] = None
     created_at: str = field(default_factory=_utc_now)
     started_at: Optional[str] = None
     finished_at: Optional[str] = None
@@ -467,6 +469,8 @@ class ToolJob:
                 "output": self.output,
                 "returncode": self.returncode,
                 "error": self.error,
+                "flagged_count": self.flagged_count,
+                "review_error": self.review_error,
                 "created_at": self.created_at,
                 "started_at": self.started_at,
                 "finished_at": self.finished_at,
@@ -570,7 +574,15 @@ class ToolJobManager:
             job.status = "running"
             job.started_at = _utc_now()
         command = [sys.executable, str(script), "-p", job.target_path]
+        review_report: Optional[Path] = None
         try:
+            if job.action == "repack":
+                descriptor, report_name = tempfile.mkstemp(
+                    prefix="llm-repack-review-", suffix=".json")
+                os.close(descriptor)
+                review_report = Path(report_name)
+                review_report.unlink()
+                command.extend(("--review-report", str(review_report)))
             result = self._runner(
                 command, cwd=str(script.parent), capture_output=True, text=True,
                 encoding="utf-8", errors="replace", check=False)
@@ -578,11 +590,32 @@ class ToolJobManager:
             if result.stderr:
                 output += (("\n" if output and not output.endswith("\n") else "")
                            + result.stderr)
+            flagged_count = 0
+            review_error = None
+            if review_report is not None:
+                try:
+                    if not review_report.is_file():
+                        raise ProjectError("repacker did not produce its review report")
+                    report = json.loads(review_report.read_text(encoding="utf-8-sig"))
+                    if not isinstance(report, Mapping) or report.get("version") != 1:
+                        raise ProjectError("repacker produced an unsupported review report")
+                    issues = report.get("issues")
+                    if not isinstance(issues, list):
+                        raise ProjectError("repacker review report has no issues array")
+                    project = Project.open(job.project_path)
+                    flagged_count = project.replace_review_flags("repack_overflow", issues)
+                except (OSError, UnicodeDecodeError, json.JSONDecodeError,
+                        ProjectError) as exc:
+                    review_error = str(exc) or exc.__class__.__name__
+                    output += (("\n" if output and not output.endswith("\n") else "")
+                               + "!! Could not update repack review flags: " + review_error + "\n")
             if len(output) > MAX_TOOL_OUTPUT_CHARS:
                 output = "[earlier output truncated]\n" + output[-MAX_TOOL_OUTPUT_CHARS:]
             with job.lock:
                 job.output = output
                 job.returncode = int(result.returncode)
+                job.flagged_count = flagged_count
+                job.review_error = review_error
                 job.status = "completed" if result.returncode == 0 else "failed"
                 if result.returncode != 0:
                     job.error = "%s failed with exit code %d" % (job.action, result.returncode)
@@ -592,6 +625,12 @@ class ToolJobManager:
                 job.status = "failed"
                 job.error = str(exc) or exc.__class__.__name__
                 job.finished_at = _utc_now()
+        finally:
+            if review_report is not None:
+                try:
+                    review_report.unlink()
+                except OSError:
+                    pass
 
     def get(self, job_id: str) -> ToolJob:
         with self._lock:

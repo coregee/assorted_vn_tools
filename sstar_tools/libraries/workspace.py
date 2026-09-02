@@ -210,7 +210,7 @@ def _build_exe(game_dir, sel, pitch):
             print('             %-14s %-12s %.40s' % (loc_s, why, s))
 
 def do_repack(game_dir, sel=None, archive_name=SCRIPT_NAME, cols=scenetext.LINE_COLS,
-              pitch=None, compress=False):
+              pitch=None, compress=False, review_report=None):
     game_dir = resolve_dir(game_dir)
     sel = set(DEFAULT_CONTENT) if sel is None else set(sel)
     pristine = ensure_workspace(
@@ -223,7 +223,8 @@ def do_repack(game_dir, sel=None, archive_name=SCRIPT_NAME, cols=scenetext.LINE_
             os.remove(os.path.join(patched, f))
         print('[scripts] building from %s\\ ...%s'
               % (SCRIPT_DIR, '' if compress else '  (storing uncompressed -- fast)'))
-        scenetext.build(_p(game_dir, SCRIPT_DIR), _p(game_dir, SCENES_SUB), patched, cols=cols)
+        scenetext.build(_p(game_dir, SCRIPT_DIR), _p(game_dir, SCENES_SUB), patched,
+                        cols=cols, review_report=review_report)
         nrepl, total = rk1.rebuild(pristine, patched, _p(game_dir, archive_name), compress=compress)
         print('  rebuilt %s: %d/%d entries replaced' % (archive_name, nrepl, total))
 

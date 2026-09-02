@@ -21,7 +21,7 @@ if __name__ == "__main__":
         print(__doc__); sys.exit(0)
     root, opts = workspace.parse_args(
         sys.argv[1:],
-        value_flags=("--cols",),
+        value_flags=("--cols", "--review-report"),
         bool_flags=("--scripts", "--image", "--audio",
                     "--patch-exe", "--restore-exe", "--show"),
         aliases={"-s": "--scripts", "-i": "--image", "-a": "--audio", "-c": "--cols"})
@@ -34,4 +34,5 @@ if __name__ == "__main__":
         workspace.do_patch_exe(root)
     else:
         cols = int(opts["--cols"]) if opts.get("--cols") else scenetext.LINE_COLS
-        workspace.do_repack(root, sel=workspace.select_content(opts), cols=cols)
+        workspace.do_repack(root, sel=workspace.select_content(opts), cols=cols,
+                            review_report=opts.get("--review-report"))

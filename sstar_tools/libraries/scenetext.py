@@ -289,7 +289,10 @@ def parse_scene(data, scene_name):
     return units
 
 def load_glossary(path):
-    return json.load(open(path, encoding='utf-8')) if os.path.exists(path) else {}
+    if not os.path.exists(path):
+        return {}
+    with open(path, encoding='utf-8') as f:
+        return json.load(f)
 
 def _merge_existing(units, prev_path):
     """Merges existing JSON tr fields with incoming to avoid clobber.."""
@@ -353,11 +356,25 @@ def _make_text_slot(op, enc, row):
     s[ROW_OFF] = row & 0xff
     return bytes(s)
 
-def _build_text_run(rec, op, cols, name, overflow, enc_err, trunc):
+def _review_issue(issues, rec, reason, **details):
+    issues.append({
+        'path': rec['_review_path'],
+        'pointer': rec['_review_pointer'],
+        'reason': reason,
+        'details': details,
+    })
+
+
+def _build_text_run(rec, op, cols, name, overflow, enc_err, trunc, review_issues):
     out = []
     lines, dropped = wrap_page(rec['tr'], cols)
     if dropped:
         trunc.append((name, rec.get('page'), dropped))
+        _review_issue(
+            review_issues, rec,
+            'Repack truncated this translation after %d on-screen lines. Dropped text: %s'
+            % (MAX_PAGE_LINES, dropped),
+            kind='line_overflow', max_lines=MAX_PAGE_LINES, dropped_text=dropped)
     for row, ln in enumerate(lines):
         bad = []
         enc = encode_for_slot(ln, bad)
@@ -365,11 +382,16 @@ def _build_text_run(rec, op, cols, name, overflow, enc_err, trunc):
             enc_err.append((name, 'page %s' % rec.get('page'), ''.join(bad)))
         if 1 + len(enc) + 1 > SLOT:
             overflow.append((name, rec.get('page'), len(enc), ln))
+            _review_issue(
+                review_issues, rec,
+                'Repack kept the original Japanese because a wrapped line needs %d bytes '
+                'but its slot holds at most %d.' % (len(enc), SLOT - 2),
+                kind='slot_overflow', encoded_bytes=len(enc), max_bytes=SLOT - 2)
             return None
         out.append(_make_text_slot(op, enc, row))
     return out or None
 
-def _build_choice_slot(orig_slot, tr, name, overflow, enc_err):
+def _build_choice_slot(orig_slot, tr, name, overflow, enc_err, rec, review_issues):
     """Rebuild one 0xcd choice slot: overwrite only the label at +0x41, preserving the
     opcode, branch tag (+0x01) and the param tail (+0x80..). Returns new bytes, or None to
     keep the original (label too long / unencodable)."""
@@ -379,6 +401,11 @@ def _build_choice_slot(orig_slot, tr, name, overflow, enc_err):
         enc_err.append((name, 'choice', ''.join(bad)))
     if len(enc) > CHOICE_MAX_BYTES:
         overflow.append((name, 'choice', len(enc), tr))
+        _review_issue(
+            review_issues, rec,
+            'Repack kept the original Japanese choice because the translation needs %d '
+            'bytes but the choice slot holds at most %d.' % (len(enc), CHOICE_MAX_BYTES),
+            kind='choice_overflow', encoded_bytes=len(enc), max_bytes=CHOICE_MAX_BYTES)
         return None
     s = bytearray(orig_slot)
     for i in range(CHOICE_TEXT_OFF, PARAM_OFF):     # clear old label, keep NUL terminator room
@@ -407,7 +434,7 @@ def _apply_speaker(data, rec, name, glossary, enc_err):
     data[base:base+SLOT] = bytes([OP_J]) + enc + b'\0' * (PARAM_OFF - 1 - len(enc)) + tail
     return 1
 
-def build_scene(orig, recs, glossary, cols, name, overflow, enc_err, trunc):
+def build_scene(orig, recs, glossary, cols, name, overflow, enc_err, trunc, review_issues):
     """Return (rebuilt_scene_bytes, slot_edits)."""
     data = bytearray(orig)
     edits = 0
@@ -428,7 +455,8 @@ def build_scene(orig, recs, glossary, cols, name, overflow, enc_err, trunc):
             if data[k*SLOT] != OP_CHOICE:
                 raise AssertionError('%s slot %d: opcode 0x%02x != 0x%02x (choice)' % (
                     name, k, data[k*SLOT], OP_CHOICE))
-            new = _build_choice_slot(data[k*SLOT:(k+1)*SLOT], rec['tr'], name, overflow, enc_err)
+            new = _build_choice_slot(data[k*SLOT:(k+1)*SLOT], rec['tr'], name,
+                                     overflow, enc_err, rec, review_issues)
             if new is None:
                 out += data[k*SLOT:(k+1)*SLOT]
             else:
@@ -442,7 +470,8 @@ def build_scene(orig, recs, glossary, cols, name, overflow, enc_err, trunc):
             if data[k*SLOT] != op:
                 raise AssertionError('%s slot %d: opcode 0x%02x != 0x%02x' % (
                     name, k, data[k*SLOT], op))
-        run = _build_text_run(rec, op, cols, name, overflow, enc_err, trunc)
+        run = _build_text_run(rec, op, cols, name, overflow, enc_err, trunc,
+                              review_issues)
         if run is None:
             for k in orig_slots:
                 out += data[k*SLOT:(k+1)*SLOT]
@@ -452,7 +481,7 @@ def build_scene(orig, recs, glossary, cols, name, overflow, enc_err, trunc):
         i = orig_slots[-1] + 1
     return bytes(out), edits
 
-def build(json_dir, scene_dir, out_dir, cols=LINE_COLS):
+def build(json_dir, scene_dir, out_dir, cols=LINE_COLS, review_report=None):
     import shutil
     os.makedirs(out_dir, exist_ok=True)
     order = os.path.join(scene_dir, '_rk1_dir.txt')
@@ -463,20 +492,36 @@ def build(json_dir, scene_dir, out_dir, cols=LINE_COLS):
     for jf in glob.glob(os.path.join(json_dir, '*.json')):
         if os.path.basename(jf).startswith('_'):
             continue
-        for rec in json.load(open(jf, encoding='utf-8')):
+        with open(jf, encoding='utf-8') as f:
+            records = json.load(f)
+        for index, raw_rec in enumerate(records):
+            rec = dict(raw_rec)
+            rec['_review_path'] = 'script/' + os.path.basename(jf)
+            rec['_review_pointer'] = '/%d' % index
             by_scene.setdefault(rec['scene'], []).append(rec)
-    overflow, enc_err, trunc, toobig = [], [], [], []
+    overflow, enc_err, trunc, toobig, review_issues = [], [], [], [], []
     edits_total = scenes_written = 0
     for fn in sorted(glob.glob(os.path.join(scene_dir, '*.BIN'))):
         name = os.path.basename(fn)
-        orig = open(fn, 'rb').read()
-        out, edits = build_scene(orig, by_scene.get(name, []), glossary, cols,
-                                 name, overflow, enc_err, trunc)
+        with open(fn, 'rb') as f:
+            orig = f.read()
+        scene_records = by_scene.get(name, [])
+        out, edits = build_scene(orig, scene_records, glossary, cols,
+                                 name, overflow, enc_err, trunc, review_issues)
         if out == orig:
             continue
         nslots = len(out) // SLOT
         if nslots > MAX_DECODE_SLOTS:
             toobig.append((name, nslots))
+            for rec in scene_records:
+                if rec.get('tr'):
+                    _review_issue(
+                        review_issues, rec,
+                        'Repack skipped this translation because the rebuilt scene needs %d '
+                        'slots but the engine can decode at most %d.'
+                        % (nslots, MAX_DECODE_SLOTS),
+                        kind='scene_overflow', required_slots=nslots,
+                        max_slots=MAX_DECODE_SLOTS)
             continue
         with open(os.path.join(out_dir, name), 'wb') as f:
             f.write(out)
@@ -501,4 +546,8 @@ def build(json_dir, scene_dir, out_dir, cols=LINE_COLS):
         print('  !! %d strings had non-Shift-JIS chars REMOVED (rest encoded):' % len(enc_err))
         for nm, where, s in enc_err[:25]:
             print('     %-12s %-12s dropped: %s' % (nm, where, s))
+    if review_report:
+        with open(review_report, 'w', encoding='utf-8') as f:
+            json.dump({'version': 1, 'issues': review_issues}, f,
+                      ensure_ascii=False, indent=1)
     return scenes_written

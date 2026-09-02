@@ -125,13 +125,14 @@ def _restore_original(folder, stem, exts=('.gpk', '.gtb')):
 
 # ------------------------------------------------------------------------ arg parsing
 
-def parse_args(argv, scope_flags=(), bool_flags=(), aliases=None):
+def parse_args(argv, scope_flags=(), bool_flags=(), value_flags=(), aliases=None):
     """Hand-rolled arg parser. -p/--path takes the next token; each scope flag (-s/-i/-a)
     collects following non-option tokens as a sub-list ([] = all of that scope), absent =
-    False; each bool flag (-e/-f) is on/off. Returns (game_dir, opts)."""
+    False; bool flags are on/off and value flags consume one argument. Returns
+    (game_dir, opts)."""
     aliases = aliases or {}
     game_dir = None
-    opts = {f: False for f in tuple(scope_flags) + tuple(bool_flags)}
+    opts = {f: False for f in tuple(scope_flags) + tuple(bool_flags) + tuple(value_flags)}
     i = 0
     while i < len(argv):
         raw = argv[i]
@@ -151,6 +152,11 @@ def parse_args(argv, scope_flags=(), bool_flags=(), aliases=None):
         elif a in bool_flags:
             opts[a] = True
             i += 1
+        elif a in value_flags:
+            if i + 1 >= len(argv):
+                sys.exit('!! %s needs a value' % raw)
+            opts[a] = argv[i + 1]
+            i += 2
         else:
             sys.exit('!! unknown option %s' % raw)
     return game_dir, opts
@@ -559,7 +565,7 @@ def _repack_wgq(game):
 _REPACK = {'text': repack_text, 'ui': repack_ui}
 
 
-def do_repack(game_dir, sel):
+def do_repack(game_dir, sel, review_report=None):
     """Run the selected repack surfaces; returns the total number of problems."""
     game = resolve_game(game_dir)
     os.makedirs(WORK, exist_ok=True)
@@ -590,4 +596,10 @@ def do_repack(game_dir, sel):
         print('\ndone with %d problem(s) -- see the !! lines above.' % problems)
     else:
         print('\ndone -- launch %s to test.' % EXE_NAME)
+    if review_report:
+        # Dasaku's proportional wrapper inserts as many line breaks as needed and its
+        # current script repacker has no truncating/does-not-fit line diagnostic. Keep
+        # the shared report contract so LLM Tools can parse every repacker uniformly.
+        with open(review_report, 'w', encoding='utf-8') as fh:
+            json.dump({'version': 1, 'issues': []}, fh, ensure_ascii=False, indent=1)
     return problems

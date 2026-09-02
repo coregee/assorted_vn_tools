@@ -145,6 +145,7 @@ class ServerIntegrationTests(unittest.TestCase):
         self.assertIn(b"const LINES_PER_PAGE = 200", app)
         self.assertIn(b"context_clear_percent: 50", app)
         self.assertIn(b"matchingLines.slice(pageStart, pageStart + LINES_PER_PAGE)", app)
+        self.assertIn(b"Repack overflow", app)
 
         opened = self.open_project()
         self.assertEqual(str(self.root), opened["project"]["root"])
@@ -261,6 +262,43 @@ class ServerIntegrationTests(unittest.TestCase):
             {"action": "extract", "path": str(ambiguous), "toolset": None})
         self.assertEqual(422, status)
         self.assertIn("choose one explicitly", payload["error"]["message"])
+
+    def test_repack_report_becomes_editable_review_flag(self):
+        def runner(command, **_kwargs):
+            report_path = Path(command[command.index("--review-report") + 1])
+            report_path.write_text(json.dumps({
+                "version": 1,
+                "issues": [{
+                    "path": "script/scene.json",
+                    "pointer": "/0",
+                    "reason": "Repack truncated this translation after three lines.",
+                    "details": {"kind": "line_overflow", "dropped_text": "tail"},
+                }],
+            }), encoding="utf-8")
+            return mock.Mock(returncode=0, stdout="repacked\n", stderr="")
+
+        self.state.tool_jobs._runner = runner
+        self.open_project()
+        created = self.request(
+            "/api/tool-jobs", "POST",
+            {"action": "repack", "path": str(self.root), "toolset": "etutane",
+             "confirmed": True},
+        )[1]
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            job = self.request("/api/tool-jobs/" + created["id"])[1]
+            if job["status"] in ("completed", "failed"):
+                break
+            time.sleep(0.02)
+        else:
+            self.fail("repack job did not finish")
+
+        self.assertEqual("completed", job["status"], job.get("error"))
+        self.assertEqual(1, job["flagged_count"])
+        snapshot = self.request(
+            "/api/file?" + urllib.parse.urlencode({"path": "script/scene.json"}))[1]
+        self.assertEqual("repack_overflow", snapshot["lines"][0]["review_flag"]["category"])
+        self.assertIn("truncated", snapshot["lines"][0]["review_flag"]["reason"])
 
     def test_unextracted_target_replaces_the_previous_project(self):
         self.open_project()

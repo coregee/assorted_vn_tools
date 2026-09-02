@@ -339,7 +339,7 @@ def extract(orig_dir, json_dir, names_path, force=False):
     print("  %d scripts, %d dialogue pages from %d source lines, %d distinct speakers"
           % (len(files), total_pages, total_source_lines, len(names)))
 
-def build(json_dir, orig_dir, out_dir, names_path, cols=LINE_COLS):
+def build(json_dir, orig_dir, out_dir, names_path, cols=LINE_COLS, review_report=None):
     """Re-encode translated pages (and glossary names) from `json_dir` back into the
     a0 blobs from `orig_dir`, writing patched copies to `out_dir`. Each page is wrapped
     to `cols`; overflow and non-SJIS encoding problems are reported, not fatal."""
@@ -351,15 +351,16 @@ def build(json_dir, orig_dir, out_dir, names_path, cols=LINE_COLS):
     if not jfiles:
         raise SystemExit("!! no %s\\*.json -- run extract first" % os.path.basename(json_dir))
     changed = 0
-    errors, warns = [], []
+    errors, warns, review_issues = [], [], []
     for jf in jfiles:
         with open(jf, encoding="utf-8") as stream:
             spec = json.load(stream)
         a0name = spec["file"]
         with open(os.path.join(orig_dir, a0name), "rb") as stream:
             orig = stream.read()
-        entries = spec.get("lines", spec.get("pages", []))
-        translated_entries = [entry for entry in entries
+        entry_key = "lines" if isinstance(spec.get("lines"), list) else "pages"
+        entries = spec.get(entry_key, [])
+        translated_entries = [(entry_index, entry) for entry_index, entry in enumerate(entries)
                               if entry.get("translated") and _entry_indices(entry)]
         if not translated_entries and not names_active:
             with open(os.path.join(out_dir, a0name), "wb") as stream:
@@ -371,7 +372,7 @@ def build(json_dir, orig_dir, out_dir, names_path, cols=LINE_COLS):
         replacements = {}
         extras_after = {}
         claimed = set()
-        for entry in translated_entries:
+        for entry_index, entry in translated_entries:
             indices = _entry_indices(entry)
             overlap = claimed.intersection(indices)
             if overlap:
@@ -390,6 +391,17 @@ def build(json_dir, orig_dir, out_dir, names_path, cols=LINE_COLS):
                 warns.append("%s#%d (%s): >%d lines -> truncated; dropped: %r"
                              % (a0name, indices[0], entry.get("kind", "narration"),
                                 budget, dropped))
+                review_issues.append({
+                    "path": "script/" + os.path.basename(jf),
+                    "pointer": "/%s/%d" % (entry_key, entry_index),
+                    "reason": ("Repack truncated this translation after %d on-screen lines. "
+                               "Dropped text: %s" % (budget, dropped)),
+                    "details": {
+                        "kind": "line_overflow",
+                        "max_lines": budget,
+                        "dropped_text": dropped,
+                    },
+                })
             try:
                 for position, index in enumerate(indices):
                     replacements[index] = (tb.encrypt_string(
@@ -448,4 +460,8 @@ def build(json_dir, orig_dir, out_dir, names_path, cols=LINE_COLS):
         print("  !! %d line(s) overflowed and were truncated:" % len(warns))
         for w in warns[:40]:
             print("     " + w)
+    if review_report:
+        with open(review_report, "w", encoding="utf-8") as stream:
+            json.dump({"version": 1, "issues": review_issues}, stream,
+                      ensure_ascii=False, indent=1)
     return changed

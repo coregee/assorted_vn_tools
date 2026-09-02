@@ -8,7 +8,7 @@ if __name__ == '__main__':
         sys.exit(0)
     game_dir, opts = workspace.parse_args(
         sys.argv[1:],
-        value_flags=('--cols',),
+        value_flags=('--cols', '--review-report'),
         optint_flags=('--vspace',),
         bool_flags=('--scripts', '--system', '--image', '--voice', '--sound', '--music',
                     '--exe-only', '--show', '--restore-exe', '--compress'),
@@ -27,4 +27,5 @@ if __name__ == '__main__':
         workspace.do_linespace(game_dir, pitch)
     else:
         workspace.do_repack(game_dir, sel=workspace.select_content(opts),
-                            cols=cols, pitch=pitch, compress=opts['--compress'])
+                            cols=cols, pitch=pitch, compress=opts['--compress'],
+                            review_report=opts.get('--review-report'))

@@ -26,6 +26,7 @@ if __name__ == '__main__':
         sys.argv[1:],
         scope_flags=('--script', '--image', '--audio'),
         bool_flags=('--exe',),
+        value_flags=('--review-report',),
         aliases={
             '-s': '--script',
             '-i': '--image',
@@ -34,4 +35,5 @@ if __name__ == '__main__':
         })
 
     sel = pipeline.select_content(opts, pipeline.REPACK_STEPS, with_exe=True)
-    sys.exit(1 if pipeline.do_repack(game_dir, sel) else 0)
+    sys.exit(1 if pipeline.do_repack(
+        game_dir, sel, review_report=opts.get('--review-report')) else 0)

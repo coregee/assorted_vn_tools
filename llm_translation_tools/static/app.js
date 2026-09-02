@@ -596,7 +596,9 @@
     }
     const action = job.action === "repack" ? "Repack" : "Extract";
     $("tool-job-title").textContent = `${action} · ${job.toolset_label || job.toolset || "game tool"}`;
-    $("tool-job-status").textContent = job.status || "queued";
+    const flagged = Number(job.flagged_count ?? 0) || 0;
+    $("tool-job-status").textContent = (job.status || "queued") +
+      (flagged ? ` · ⚑ ${flagged}` : "");
     $("tool-job-output").textContent = job.output || (toolJobIsActive() ? "Waiting for tool output…" : "No output.");
     $("tool-job-output").scrollTop = $("tool-job-output").scrollHeight;
     updateToolUi();
@@ -744,13 +746,19 @@
         return;
       }
       const finished = state.toolJob;
-      setStatus(`${finished.action === "repack" ? "Repacked" : "Extracted"} scripts successfully`);
       if (finished.action === "extract") {
+        setStatus("Extracted scripts successfully");
         await openProjectPath(finished.project_path || finished.target_path, {
           targetPath: finished.target_path,
         });
-      } else if (state.activeFile) {
+      } else {
         await refreshTranslatedFiles({ preserveSelection: true });
+        const flagged = Number(finished.flagged_count ?? 0) || 0;
+        setStatus("Repacked scripts successfully" +
+          (flagged ? `; flagged ${flagged} line${flagged === 1 ? "" : "s"} that did not fit` : ""));
+        if (finished.review_error) {
+          showError(finished.review_error, "Repacked, but review flags were not updated");
+        }
       }
     } catch (error) {
       showError(error, "Could not read game tool status");
@@ -809,9 +817,15 @@
 
   function lineMatchesFilter(line, query) {
     if (!query) return true;
-    return `${line.sourceDisplay}\n${line.translation}\n${line.speaker}\n${line.context}\n${line.kind}`
+    return `${line.sourceDisplay}\n${line.translation}\n${line.speaker}\n${line.context}\n${line.kind}\n${line.reviewFlag?.reason || ""}`
       .toLocaleLowerCase()
       .includes(query);
+  }
+
+  function reviewFlagLabel(flag) {
+    if (flag?.category === "repack_overflow") return "Repack overflow";
+    if (flag?.category === "multiple") return "Multiple review flags";
+    return "Review delimiters";
   }
 
   function appendLineSection(container, label, value, className) {
@@ -856,7 +870,9 @@
       if (line.emptyIsApplied && line.hasTranslation && line.translation === "") {
         meta.append(createElement("span", "kind-badge blank-output-badge", "Intentional blank"));
       }
-      if (line.reviewFlag) meta.append(createElement("span", "review-flag-badge", "Review delimiters"));
+      if (line.reviewFlag) {
+        meta.append(createElement("span", "review-flag-badge", reviewFlagLabel(line.reviewFlag)));
+      }
       if (!line.translatable) meta.append(createElement("span", "locked-label", "Not translatable"));
       content.append(meta);
 
