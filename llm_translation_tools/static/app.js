@@ -214,7 +214,7 @@
     "line-filter", "visible-line-count", "job-panel", "job-title", "job-message", "job-progressbar", "job-progress",
     "cancel-job", "line-list", "empty-lines", "line-pagination", "previous-line-page", "line-page-label",
     "next-line-page", "app-status", "settings-button", "settings-dialog",
-    "settings-form", "setting-base-url", "setting-model", "models-list", "models-status", "setting-target-language",
+    "settings-form", "setting-base-url", "setting-api-key", "setting-model", "models-list", "models-status", "setting-target-language",
     "setting-batch-mode", "setting-batch-limit", "setting-context-window", "setting-response-reserve", "setting-context-clear", "setting-temperature",
     "setting-enable-thinking", "setting-allow-remote", "setting-game-context", "setting-system-prompt", "load-models", "settings-status",
     "save-default-settings", "save-settings", "theme-toggle", "theme-icon", "shortcuts-button", "shortcuts-dialog",
