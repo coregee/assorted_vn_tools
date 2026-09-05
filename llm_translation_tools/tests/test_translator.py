@@ -2,7 +2,7 @@ import copy
 import json
 import unittest
 
-from llm_translation_tools.lmstudio import LMStudioCompletion, LMStudioError
+from llm_translation_tools.openai_client import OpenAIError
 from llm_translation_tools.translator import (
     TranslationEngine,
     TranslationError,
@@ -63,30 +63,6 @@ class RecordingClient:
         if isinstance(response, Exception):
             raise response
         return response
-
-
-class StatefulRecordingClient:
-    def __init__(self, responses):
-        self.responses = list(responses)
-        self.calls = []
-
-    def response_completion(self, messages, model, temperature, max_tokens,
-                            response_format=None, reasoning_effort=None,
-                            previous_response_id=None):
-        self.calls.append({
-            "messages": copy.deepcopy(list(messages)),
-            "model": model,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-            "response_format": copy.deepcopy(response_format),
-            "reasoning_effort": reasoning_effort,
-            "previous_response_id": previous_response_id,
-        })
-        response = self.responses.pop(0)
-        if isinstance(response, Exception):
-            raise response
-        content, response_id = response
-        return LMStudioCompletion(content, response_id)
 
 
 def response_for(translation):
@@ -174,14 +150,14 @@ class TranslationCycleTests(unittest.TestCase):
         self.assertEqual(len(messages) - 2, len(forced_minimal))
         self.assertLessEqual(estimate_message_tokens(forced_half_clear), 750)
 
-    def test_context_replay_resumes_stateful_continuation_after_half_clear(self):
+    def test_context_history_grows_again_after_half_clear(self):
         path = "script/a.json"
         lines = [
             line(path, index, chr(0x4e00 + index) * 100)
             for index in range(5)
         ]
-        client = StatefulRecordingClient([
-            (response_for(str(index)), "resp_%d" % index)
+        client = RecordingClient([
+            response_for(str(index))
             for index in range(5)
         ])
 
@@ -195,14 +171,10 @@ class TranslationCycleTests(unittest.TestCase):
             },
         )
 
-        self.assertEqual(
-            [None, "resp_0", "resp_1", None, "resp_3"],
-            [call["previous_response_id"] for call in client.calls],
-        )
         self.assertEqual(["system", "user"], [
             message["role"] for message in client.calls[3]["messages"]
         ])
-        self.assertEqual(["user"], [
+        self.assertEqual(["system", "user", "assistant", "user"], [
             message["role"] for message in client.calls[4]["messages"]
         ])
 
@@ -222,12 +194,12 @@ class TranslationCycleTests(unittest.TestCase):
         self.assertTrue(result[0]["flagged"])
         self.assertTrue(committed[0]["flagged"])
 
-    def test_stateful_follow_up_sends_only_the_new_turn(self):
+    def test_chat_follow_up_resends_retained_conversation(self):
         path = "script/a.json"
         lines = [line(path, 0, "一"), line(path, 1, "二")]
-        client = StatefulRecordingClient([
-            (response_for("One."), "resp_one"),
-            (response_for("Two."), "resp_two"),
+        client = RecordingClient([
+            response_for("One."),
+            response_for("Two."),
         ])
 
         TranslationEngine(client).translate(
@@ -237,24 +209,22 @@ class TranslationCycleTests(unittest.TestCase):
         self.assertEqual(["system", "user"], [
             message["role"] for message in client.calls[0]["messages"]
         ])
-        self.assertIsNone(client.calls[0]["previous_response_id"])
-        self.assertEqual(["user"], [
+        self.assertEqual(["system", "user", "assistant", "user"], [
             message["role"] for message in client.calls[1]["messages"]
         ])
-        self.assertEqual("resp_one", client.calls[1]["previous_response_id"])
         self.assertNotIn("One.", client.calls[1]["messages"][0]["content"])
 
     def test_context_overflow_drops_oldest_turn_and_restarts_conversation(self):
         path = "script/a.json"
         lines = [line(path, 0, "一"), line(path, 1, "二")]
-        overflow = LMStudioError(
+        overflow = OpenAIError(
             "prompt exceeds model context length", status=400,
             body='{"error":"context length exceeded"}',
         )
-        client = StatefulRecordingClient([
-            (response_for("One."), "resp_one"),
+        client = RecordingClient([
+            response_for("One."),
             overflow,
-            (response_for("Two."), "resp_two"),
+            response_for("Two."),
         ])
 
         result = TranslationEngine(client).translate(
@@ -262,42 +232,14 @@ class TranslationCycleTests(unittest.TestCase):
         )
 
         self.assertEqual(2, len(result))
-        self.assertEqual(["user"], [
+        self.assertEqual(["system", "user", "assistant", "user"], [
             message["role"] for message in client.calls[1]["messages"]
         ])
-        self.assertEqual("resp_one", client.calls[1]["previous_response_id"])
         self.assertEqual(["system", "user"], [
             message["role"] for message in client.calls[2]["messages"]
         ])
-        self.assertIsNone(client.calls[2]["previous_response_id"])
         self.assertNotIn("一", client.calls[2]["messages"][-1]["content"])
         self.assertIn("二", client.calls[2]["messages"][-1]["content"])
-
-    def test_expired_response_id_replays_local_history(self):
-        path = "script/a.json"
-        lines = [line(path, 0, "一"), line(path, 1, "二")]
-        expired = LMStudioError(
-            "previous_response_id was not found", status=404,
-        )
-        client = StatefulRecordingClient([
-            (response_for("One."), "resp_one"),
-            expired,
-            (response_for("Two."), "resp_two"),
-        ])
-
-        TranslationEngine(client).translate(
-            [{"path": path, "lines": lines}], SETTINGS
-        )
-
-        self.assertEqual("resp_one", client.calls[1]["previous_response_id"])
-        self.assertEqual(["user"], [
-            message["role"] for message in client.calls[1]["messages"]
-        ])
-        self.assertIsNone(client.calls[2]["previous_response_id"])
-        self.assertEqual(["system", "user", "assistant", "user"], [
-            message["role"] for message in client.calls[2]["messages"]
-        ])
-        self.assertIn("One.", client.calls[2]["messages"][-2]["content"])
 
     def test_batches_by_message_count_without_crossing_file_boundaries(self):
         path = "script/a.json"
@@ -539,9 +481,9 @@ class TranslationCycleTests(unittest.TestCase):
 
     def test_short_window_discards_retry_chatter_instead_of_failing(self):
         target = line("script/a.json", 0, "短い台詞")
-        client = StatefulRecordingClient([
-            ("not json", "resp_invalid"),
-            (response_for("A short line."), "resp_valid"),
+        client = RecordingClient([
+            "not json",
+            response_for("A short line."),
         ])
         settings = {
             **SETTINGS,
@@ -559,13 +501,12 @@ class TranslationCycleTests(unittest.TestCase):
         ])
         self.assertIn("PREVIOUS RESPONSE INVALID", client.calls[1]["messages"][-1]["content"])
         self.assertNotIn("not json", client.calls[1]["messages"][-1]["content"])
-        self.assertIsNone(client.calls[1]["previous_response_id"])
         self.assertEqual(204, client.calls[1]["max_tokens"])
 
     def test_timeout_retries_the_same_turn_before_committing(self):
         target = line("script/a.json", 0, "こんにちは")
         client = RecordingClient([
-            LMStudioError("request timed out"),
+            OpenAIError("request timed out"),
             response_for("Hello."),
         ])
         committed = []
@@ -618,7 +559,7 @@ class TranslationCycleTests(unittest.TestCase):
     def test_structured_output_rejection_falls_back_to_plain_json(self):
         target = line("script/a.json", 0, "こんにちは")
         client = RecordingClient([
-            LMStudioError("unsupported response format", status=400),
+            OpenAIError("unsupported response format", status=400),
             response_for("Hello."),
         ])
 

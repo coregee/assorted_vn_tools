@@ -159,7 +159,8 @@
   };
 
   const DEFAULT_SETTINGS = Object.freeze({
-    base_url: "http://127.0.0.1:1234/v1",
+    base_url: "http://localhost:8000/api/v1",
+    api_key: "",
     model: "",
     enable_thinking: true,
     system_prompt: "",
@@ -171,7 +172,7 @@
     context_window: 32768,
     response_reserve_percent: 20,
     context_clear_percent: 50,
-    allow_remote_lmstudio: false,
+    allow_remote_endpoint: false,
   });
 
   const THEME_STORAGE_KEY = "translation-workbench.theme";
@@ -1134,7 +1135,8 @@
       context_window: numeric("setting-context-window", DEFAULT_SETTINGS.context_window),
       response_reserve_percent: numeric("setting-response-reserve", DEFAULT_SETTINGS.response_reserve_percent),
       context_clear_percent: numeric("setting-context-clear", DEFAULT_SETTINGS.context_clear_percent),
-      allow_remote_lmstudio: $("setting-allow-remote").checked,
+      api_key: $("setting-api-key").value.trim(),
+      allow_remote_endpoint: $("setting-allow-remote").checked,
     };
   }
 
@@ -1156,7 +1158,8 @@
     $("setting-context-window").value = settings.context_window ?? DEFAULT_SETTINGS.context_window;
     $("setting-response-reserve").value = settings.response_reserve_percent ?? DEFAULT_SETTINGS.response_reserve_percent;
     $("setting-context-clear").value = settings.context_clear_percent ?? DEFAULT_SETTINGS.context_clear_percent;
-    $("setting-allow-remote").checked = Boolean(settings.allow_remote_lmstudio);
+    $("setting-api-key").value = settings.api_key || "";
+    $("setting-allow-remote").checked = Boolean(settings.allow_remote_endpoint);
     $("settings-status").textContent = "";
   }
 
@@ -1235,19 +1238,21 @@
       return;
     }
     setButtonBusy($("load-models"), true, "Loading…");
-    $("models-status").textContent = "Connecting to LM Studio…";
+    $("models-status").textContent = "Connecting to LLM server…";
     try {
       // GET /api/models uses persisted connection settings, so persist only the
       // connection fields before discovery without closing the dialog.
       const savedConnection = await api.saveSettings({
         base_url: baseUrl,
-        allow_remote_lmstudio: $("setting-allow-remote").checked,
+        api_key: $("setting-api-key").value.trim(),
+        allow_remote_endpoint: $("setting-allow-remote").checked,
       });
       const returnedConnection = savedConnection?.settings ?? savedConnection ?? {};
       state.settings = {
         ...state.settings,
         base_url: returnedConnection.base_url ?? baseUrl,
-        allow_remote_lmstudio: returnedConnection.allow_remote_lmstudio ?? $("setting-allow-remote").checked,
+        api_key: returnedConnection.api_key ?? $("setting-api-key").value.trim(),
+        allow_remote_endpoint: returnedConnection.allow_remote_endpoint ?? $("setting-allow-remote").checked,
       };
       const models = normalizeModels(await api.getModels());
       $("models-list").replaceChildren(...models.map((model) => {
@@ -1258,10 +1263,10 @@
       if (models.length === 1 && !$("setting-model").value.trim()) $("setting-model").value = models[0];
       $("models-status").textContent = models.length
         ? `${models.length} model${models.length === 1 ? "" : "s"} available`
-        : "LM Studio returned no loaded models";
+        : "LLM server returned no loaded models";
     } catch (error) {
       $("models-status").textContent = error.message;
-      showError(error, "Could not load LM Studio models");
+      showError(error, "Could not load LLM server models");
     } finally {
       setButtonBusy($("load-models"), false);
     }
@@ -1272,6 +1277,7 @@
     const payload = {
       files: filePaths,
       base_url: settings.base_url,
+      api_key: settings.api_key,
       model: settings.model,
       enable_thinking: settings.enable_thinking,
       system_prompt: settings.system_prompt,
@@ -1283,7 +1289,7 @@
       context_window: settings.context_window,
       response_reserve_percent: settings.response_reserve_percent,
       context_clear_percent: settings.context_clear_percent,
-      allow_remote_lmstudio: settings.allow_remote_lmstudio,
+      allow_remote_endpoint: settings.allow_remote_endpoint,
     };
     if (lineIds !== undefined) payload.line_ids = lineIds;
     return payload;
@@ -1352,7 +1358,7 @@
     else $("job-progressbar").removeAttribute("aria-valuenow");
     $("job-message").textContent = job.message || (job.total
       ? `${job.completed} of ${job.total} lines`
-      : job.status === "queued" ? "Waiting for LM Studio…" : "Building context and translating…");
+      : job.status === "queued" ? "Waiting for LLM server…" : "Building context and translating…");
     $("cancel-job").disabled = isFinishedStatus(job.status) || job.status === "cancelling";
     $("file-list").querySelectorAll(".file-item").forEach((button) => { button.disabled = state.saving; });
     $("file-list").querySelectorAll(".file-select").forEach((checkbox) => { checkbox.disabled = true; });
@@ -1400,7 +1406,7 @@
     }
     if (state.dirty.size && !(await saveActiveFile())) return;
     if (!state.settings.model) {
-      showError("Choose an LM Studio model in Settings before starting a translation.", "Model required");
+      showError("Choose an LLM server model in Settings before starting a translation.", "Model required");
       openSettings();
       return;
     }

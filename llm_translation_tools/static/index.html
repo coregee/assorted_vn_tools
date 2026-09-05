@@ -127,7 +127,7 @@
           <span>あ</span><span>A</span>
         </div>
         <h1>Open an extracted game folder</h1>
-        <p>Translate extracted JSON script lines with your local LM Studio model, or edit target fields by hand.</p>
+        <p>Translate extracted JSON script lines with your local LLM server model, or edit target fields by hand.</p>
         <button class="button button-primary" id="choose-folder-button" type="button">Choose a folder</button>
       </div>
 
@@ -175,7 +175,7 @@
         <section class="job-panel" id="job-panel" aria-live="polite" hidden>
           <div class="job-heading">
             <div>
-              <strong id="job-title">Translating with LM Studio</strong>
+              <strong id="job-title">Translating with LLM server</strong>
               <span id="job-message">Preparing context…</span>
             </div>
             <button class="button button-quiet" id="cancel-job" type="button">Cancel</button>
@@ -220,15 +220,20 @@
         <section class="settings-section" aria-labelledby="connection-title">
           <div class="settings-section-heading">
             <div>
-              <h3 id="connection-title">LM Studio connection</h3>
-              <p>Use LM Studio's OpenAI-compatible local server.</p>
+              <h3 id="connection-title">OpenAI-compatible connection</h3>
+              <p>Use Lemonade or another OpenAI-compatible server. Include the API prefix in the base URL (for example, /api/v1 or /v1).</p>
             </div>
             <button class="button button-secondary" id="load-models" type="button">Load models</button>
           </div>
           <div class="form-grid">
             <label class="field field-wide">
               <span>Base URL</span>
-              <input id="setting-base-url" name="base_url" type="url" placeholder="http://127.0.0.1:1234/v1" required>
+              <input id="setting-base-url" name="base_url" type="url" placeholder="http://localhost:8000/api/v1" required>
+            </label>
+            <label class="field field-wide">
+              <span>API key (optional)</span>
+              <input id="setting-api-key" name="api_key" type="password" autocomplete="off" placeholder="Leave blank if authentication is not required">
+              <small>Save as default stores this key in your local defaults file.</small>
             </label>
             <label class="field field-wide">
               <span>Model</span>
@@ -276,8 +281,8 @@
               <input id="setting-temperature" name="temperature" type="number" min="0" max="2" step="0.05" required>
             </label>
             <label class="checkbox-field field-wide">
-              <input id="setting-allow-remote" name="allow_remote_lmstudio" type="checkbox">
-              <span>Allow a non-local LM Studio host. Enable only for a server you trust; game text and context will be sent to it.</span>
+              <input id="setting-allow-remote" name="allow_remote_endpoint" type="checkbox">
+              <span>Allow a non-local LLM server host. Enable only for a server you trust; game text and context will be sent to it.</span>
             </label>
           </div>
         </section>

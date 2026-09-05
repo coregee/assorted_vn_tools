@@ -13,7 +13,7 @@ from unittest import mock
 from llm_translation_tools.server import AppState, SettingsStore, create_server
 
 
-class FakeLMStudioClient:
+class FakeOpenAIClient:
     def __init__(self, *args, **kwargs):
         pass
 
@@ -31,7 +31,7 @@ class FakeLMStudioClient:
         ])
 
 
-class BlockingSecondTurnClient(FakeLMStudioClient):
+class BlockingSecondTurnClient(FakeOpenAIClient):
     calls = 0
     lock = threading.Lock()
     second_started = threading.Event()
@@ -475,7 +475,7 @@ class ServerIntegrationTests(unittest.TestCase):
         self.assertEqual(400, status)
         self.assertIn("unknown settings", payload["error"]["message"])
 
-    @mock.patch("llm_translation_tools.server.LMStudioClient", FakeLMStudioClient)
+    @mock.patch("llm_translation_tools.server.OpenAIClient", FakeOpenAIClient)
     def test_job_writes_multiple_files_in_sequence(self):
         (self.script / "scene_b.json").write_text(
             json.dumps([
@@ -522,7 +522,7 @@ class ServerIntegrationTests(unittest.TestCase):
             {},
         )[0])
 
-    @mock.patch("llm_translation_tools.server.LMStudioClient", BlockingSecondTurnClient)
+    @mock.patch("llm_translation_tools.server.OpenAIClient", BlockingSecondTurnClient)
     def test_job_saves_each_turn_and_preserves_it_when_cancelled(self):
         (self.script / "scene.json").write_text(
             json.dumps([

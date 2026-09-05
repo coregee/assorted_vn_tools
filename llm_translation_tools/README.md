@@ -2,18 +2,23 @@
 
 A local browser editor for the extracted script JSON produced by the three VN
 toolsets in this repository. The Python server binds to loopback, the interface
-runs in your normal browser, and translation requests go to LM Studio. This is
+runs in your normal browser, and translation requests go to a configurable OpenAI-compatible endpoint. This is
 not a hosted service and has no ChatGPT Sites integration.
 
 ## Requirements
 
 - Python 3.9 or newer. There are no third-party Python dependencies.
-- [LM Studio](https://lmstudio.ai/docs/developer/core/server) with a chat model
-  loaded and its local server running.
+- Lemonade or another server implementing OpenAI-compatible `/models` and
+  `/chat/completions` endpoints, with a chat/instruct model available.
 
-LM Studio's default OpenAI-compatible base URL is
-`http://127.0.0.1:1234/v1`. The editor uses its `/models` and
-`/chat/completions` endpoints.
+The default base URL is `http://localhost:8000/api/v1` for
+[Lemonade](https://lemonade-server.ai/docs/api/openai/). Enter the API base URL
+shown by your server, including its path prefix. For LM Studio, use
+`http://127.0.0.1:1234/v1`; other servers commonly use `/v1`.
+Enter an optional **API key** for servers requiring Bearer authentication.
+The key stays out of project files; **Save as default** stores it in plaintext
+in your local user defaults file. Existing saved URLs are preserved. Requests use Chat Completions, so the server
+need not implement the Responses API or store conversation IDs.
 
 ## Start the editor
 
@@ -44,13 +49,13 @@ open a known folder immediately at launch.
 
 ## Workflow
 
-1. Start LM Studio's local server and load a chat/instruct model.
+1. Start your OpenAI-compatible server and make a chat/instruct model available.
 2. Choose the target game folder in the editor.
 3. If scripts have not been extracted yet, choose the matching **Game toolset**
    (or leave it on auto-detect) and use **Extract scripts**. The workbench runs
    the repository's existing tool against the selected game folder and opens
    the resulting script corpus when it succeeds.
-4. Open **Settings**, load the model list, select a model, and choose whether
+4. Open **Settings**, enter the server base URL, load the model list, select a model, and choose whether
    that model should use thinking/reasoning for translation requests.
 5. Describe the game, characters, tone, terminology, and naming rules in
    **Game context**. Customize the system prompt if needed.
@@ -81,16 +86,15 @@ operations documented by the individual toolsets.
 The model is not given isolated lines. Files are processed sequentially, and
 every successful request turn is written to the native target fields before
 the next request begins. The editor reloads those committed translations as
-job progress advances. LM Studio's stateful `/v1/responses` endpoint stores the
-active conversation, so after the first request each normal request sends only
-the new user turn with `previous_response_id`. The complete local transcript is
-still retained for validation, recovery, and context trimming. The response
+job progress advances. Each `/chat/completions` request sends the retained
+system/user/assistant transcript. Conversation history is managed locally for
+validation, recovery, and context trimming. The response
 reserve is subtracted from the model context window first. When the next turn
 would overflow the remaining prompt budget, the oldest complete turns are
 cleared until the retained prompt reaches the configured target. The default
 50% clear setting targets half of the usable prompt budget while always keeping
 the system message and current turn; 0% keeps the former behavior of trimming
-only enough to fit. Stateful continuation then resumes from that shorter
+only enough to fit. Subsequent requests send that shorter
 transcript and fills the context again. Within a file, translation runs in
 chronological conversation turns using:
 
@@ -108,16 +112,16 @@ coherent unit.
 5. translated speaker-glossary context, with Japanese source line breaks removed;
 6. a simple JSON string-array response schema, exact count/order validation,
    per-entry engine-token review flags, and up to three retries for
-   malformed/incomplete output or transient LM Studio request failures.
+   malformed/incomplete output or transient LLM server request failures.
 
-LM Studio currently applies grammar-enforced JSON schemas only to its stateless
-Chat Completions endpoint. Stateful Responses output is therefore protected by
-the same strict application-level JSON, count, and order validation. Engine-token
+The editor requests a JSON schema when supported, falling back to plain chat
+if the server rejects the format. All output still passes strict application-level
+JSON, count, and order validation. Engine-token
 mismatches are accepted with per-entry review flags; structurally invalid responses
 are repaired conversationally before anything is committed.
 
-Each request adds only the chronological lines not already present in the
-conversation. Set **Batch by** to **Messages** to cap the number of target
+Each new turn adds only the chronological lines not already present in the
+conversation; the retained transcript is resent with each request. Set **Batch by** to **Messages** to cap the number of target
 messages per request, or **Source characters** to pack consecutive messages up
 to a combined source-character limit. A single message is always included even
 when it exceeds the character limit. Batches never cross file boundaries.
@@ -126,19 +130,20 @@ History resets at file boundaries because the extracted formats do not encode
 a reliable cross-file story order. The configured **Response reserve** is kept
 free within the model's **Context window**; when the input no longer fits, the
 oldest complete conversation turns and then the oldest reference lines are
-removed. If LM Studio reports a context overflow despite that estimate, the
+removed. If LLM server reports a context overflow despite that estimate, the
 oldest complete turn is removed and the request is retried as a new shortened
 conversation. Token budgeting uses a conservative UTF-8 byte estimate so it
 remains model-independent.
 
-Set **Context window** to the context length configured for the loaded LM Studio
+Set **Context window** to the context length configured for the loaded LLM server
 model. For a good result, keep related event lines in their native file and
 write specific game context before translating.
 
 The **Enable thinking** setting is stored with the selected model settings. It
-sends LM Studio `reasoning_effort: "medium"` when enabled and `"none"` when
+sends LLM server `reasoning_effort: "medium"` when enabled and `"none"` when
 disabled. Models whose chat template does not expose controllable reasoning may
-ignore the setting.
+ignore the setting. If the server explicitly rejects `reasoning_effort`, the
+client retries without it and omits it for the rest of that job.
 
 Use **Save as default** in the settings dialog to apply the current form to the
 open project and use it as the starting configuration for future projects. User
@@ -166,8 +171,8 @@ native game JSON consumed by the repackers.
 ## Local safety and persistence
 
 - The editor server only binds to a loopback address.
-- LM Studio URLs are restricted to localhost/loopback unless **Allow a remote
-  LM Studio host** is explicitly enabled.
+- LLM server URLs are restricted to localhost/loopback unless **Allow a remote
+  LLM server host** is explicitly enabled.
 - Writes are atomic and require the file revision token loaded by the editor;
   an externally changed file must be reloaded before saving.
 - Per-project prompt/context settings are stored as

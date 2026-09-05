@@ -7,8 +7,8 @@ import re
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
-from .lmstudio import (LMStudioClient, LMStudioError,
-                       TRANSLATIONS_RESPONSE_FORMAT)
+from .openai_client import (OpenAIClient, OpenAIError,
+                            TRANSLATIONS_RESPONSE_FORMAT)
 
 
 DEFAULT_SYSTEM_PROMPT = """You are translating a Japanese visual novel into polished,
@@ -39,12 +39,12 @@ class TranslationCancelled(TranslationError):
     pass
 
 
-def _retryable_lmstudio_error(error: LMStudioError) -> bool:
+def _retryable_endpoint_error(error: OpenAIError) -> bool:
     return (error.status is None or error.status in (408, 429) or
             error.status >= 500)
 
 
-def _context_overflow_lmstudio_error(error: LMStudioError) -> bool:
+def _context_overflow_endpoint_error(error: OpenAIError) -> bool:
     if error.status not in (400, 413, 422):
         return False
     detail = (str(error) + "\n" + (error.body or "")).lower()
@@ -53,15 +53,6 @@ def _context_overflow_lmstudio_error(error: LMStudioError) -> bool:
         "too many tokens", "input too long", "prompt is too long", "n_ctx",
     )
     return any(marker in detail for marker in markers)
-
-
-def _missing_previous_response_error(error: LMStudioError) -> bool:
-    if error.status not in (400, 404, 410):
-        return False
-    detail = (str(error) + "\n" + (error.body or "")).lower()
-    return ("previous_response_id" in detail or
-            "previous response" in detail or
-            ("response" in detail and "not found" in detail))
 
 
 @dataclass
@@ -314,7 +305,7 @@ def _trim_old_turns(messages: Sequence[Mapping[str, str]], prompt_limit: int,
     Trimming begins only after the prompt exceeds ``prompt_limit`` unless ``force`` is
     true because the model reported an overflow despite the local estimate. A zero
     clear percentage preserves the former behavior: remove only enough history for the
-    request to fit. Higher values create headroom for subsequent stateful turns.
+    request to fit. Higher values create headroom for subsequent turns.
     """
     if not messages:
         return []
@@ -435,46 +426,27 @@ def fit_batch_request(history: Sequence[Mapping[str, str]], batch: TranslationBa
 
 
 class TranslationEngine:
-    def __init__(self, client: LMStudioClient):
+    def __init__(self, client: OpenAIClient):
         self.client = client
 
     def _complete(self, messages: Sequence[Mapping[str, str]], model: str,
                   temperature: float, max_tokens: int,
                   structured_supported: bool,
-                  enable_thinking: bool,
-                  previous_response_id: Optional[str] = None,
-                  ) -> Tuple[str, bool, Optional[str]]:
-        reasoning_effort = "medium" if enable_thinking else "none"
-        stateful = getattr(self.client, "response_completion", None)
-        using_stateful_responses = callable(stateful)
-        # LM Studio currently documents grammar-enforced schemas only for
-        # /chat/completions. Stateful /responses output remains strictly validated below.
-        response_format = (TRANSLATIONS_RESPONSE_FORMAT
-                           if structured_supported and not using_stateful_responses else None)
+                  enable_thinking: bool) -> Tuple[str, bool]:
+        response_format = TRANSLATIONS_RESPONSE_FORMAT if structured_supported else None
 
-        def request(active_format: Optional[Mapping[str, Any]]) -> Tuple[str, Optional[str]]:
-            if using_stateful_responses:
-                result = stateful(
-                    messages, model, temperature, max_tokens, active_format,
-                    reasoning_effort=reasoning_effort,
-                    previous_response_id=previous_response_id,
-                )
-                return result.content, result.response_id
-            return (self.client.chat_completion(
+        def request(active_format: Optional[Mapping[str, Any]]) -> str:
+            return self.client.chat_completion(
                 messages, model, temperature, max_tokens, active_format,
-                reasoning_effort=reasoning_effort), None)
+                reasoning_effort="medium" if enable_thinking else "none")
 
         try:
-            content, response_id = request(response_format)
-            return content, structured_supported and not using_stateful_responses, response_id
-        except LMStudioError as exc:
-            # Some loaded models/LM Studio versions reject response_format. Retry the same
-            # first request without it; parsing remains strict below.
+            return request(response_format), structured_supported
+        except OpenAIError as exc:
+            # Some servers/models reject response_format. Parsing remains strict.
             if (response_format is not None and exc.status in (400, 404, 415, 422) and
-                    not _context_overflow_lmstudio_error(exc) and
-                    not _missing_previous_response_error(exc)):
-                content, response_id = request(None)
-                return content, False, response_id
+                    not _context_overflow_endpoint_error(exc)):
+                return request(None), False
             raise
 
     def translate(self, files: Sequence[Mapping[str, Any]], settings: Mapping[str, Any],
@@ -508,7 +480,6 @@ class TranslationEngine:
         structured_supported = True
         current_file: Optional[str] = None
         history: List[Dict[str, str]] = []
-        previous_response_id: Optional[str] = None
         context_start = 0
 
         custom_prompt = settings.get("system_prompt") or DEFAULT_SYSTEM_PROMPT
@@ -529,42 +500,26 @@ class TranslationEngine:
                 # Script filenames are not guaranteed to have story-contiguous ordering.
                 # Retain dialogue history across turns only within the same file.
                 history = [{"role": "system", "content": system_content}]
-                previous_response_id = None
                 current_file = batch.file_path
                 context_start = 0
             request_messages = fit_batch_request(
                 history, batch, context_start, suggested, glossary, prompt_limit,
                 clear_percent)
-            can_continue = (
-                previous_response_id is not None and
-                request_messages[:-1] == history
-            )
             attempt_messages = request_messages
-            attempt_input = ([dict(request_messages[-1])] if can_continue
-                             else [dict(message) for message in request_messages])
-            attempt_previous_response_id = previous_response_id if can_continue else None
             parsed: Optional[List[Dict[str, Any]]] = None
             repair_attempt = 0
             request_failures = 0
-            successful_response_id: Optional[str] = None
             while repair_attempt <= TURN_RETRY_COUNT:
                 if (repair_attempt or request_failures) and cancelled and cancelled():
                     raise TranslationCancelled("translation cancelled")
                 try:
-                    raw, structured_supported, response_id = self._complete(
-                        attempt_input, settings["model"],
+                    raw, structured_supported = self._complete(
+                        attempt_messages, settings["model"],
                         float(settings["temperature"]), max_tokens,
                         structured_supported,
-                        bool(settings.get("enable_thinking", True)),
-                        attempt_previous_response_id)
-                except LMStudioError as error:
-                    if (attempt_previous_response_id is not None and
-                            _missing_previous_response_error(error)):
-                        attempt_input = [dict(message) for message in attempt_messages]
-                        attempt_previous_response_id = None
-                        previous_response_id = None
-                        continue
-                    if _context_overflow_lmstudio_error(error):
+                        bool(settings.get("enable_thinking", True)))
+                except OpenAIError as error:
+                    if _context_overflow_endpoint_error(error):
                         preserve_tail = 3 if repair_attempt else 1
                         trimmed = _clear_oldest_complete_turns(
                             attempt_messages, prompt_limit, preserve_tail,
@@ -575,15 +530,12 @@ class TranslationEngine:
                                 request_messages = attempt_messages[:-2]
                             else:
                                 request_messages = attempt_messages
-                            attempt_input = [dict(message) for message in attempt_messages]
-                            attempt_previous_response_id = None
-                            previous_response_id = None
                             continue
                     if (request_failures >= TURN_RETRY_COUNT or
-                            not _retryable_lmstudio_error(error)):
+                            not _retryable_endpoint_error(error)):
                         if request_failures:
                             raise TranslationError(
-                                "LM Studio request failed after %d retries: %s" %
+                                "LLM server request failed after %d retries: %s" %
                                 (request_failures, error)
                             ) from error
                         raise
@@ -621,31 +573,16 @@ class TranslationEngine:
                             request_messages, prompt_limit, len(batch.targets),
                             clear_percent)
                         request_messages = attempt_messages
-                        attempt_input = [dict(message) for message in attempt_messages]
-                        attempt_previous_response_id = None
                     else:
-                        repair_trimmed = attempt_messages != repair_candidate
                         request_messages = attempt_messages[:-2]
-                        # The first repair can branch directly from the invalid response.
-                        # Later repairs restart from canonical history so retry chatter does
-                        # not grow.
-                        if (response_id is not None and repair_attempt == 1 and
-                                not repair_trimmed):
-                            attempt_input = [{"role": "user", "content": repair}]
-                            attempt_previous_response_id = response_id
-                        else:
-                            attempt_input = [dict(message) for message in attempt_messages]
-                            attempt_previous_response_id = None
                     continue
 
                 # Future context only needs the valid canonical turn, not retry chatter.
                 history = request_messages + [{"role": "assistant", "content": raw}]
-                successful_response_id = response_id if repair_attempt == 0 else None
                 break
 
             if parsed is None:
                 raise TranslationError("translation turn ended without a valid response")
-            previous_response_id = successful_response_id
 
             targets_by_id = {line["id"]: line for line in batch.targets}
             turn_suggestions: List[Dict[str, Any]] = []

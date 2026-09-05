@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
 from urllib.parse import parse_qs, unquote, urlsplit
 
-from .lmstudio import DEFAULT_BASE_URL, LMStudioClient, LMStudioError, validate_base_url
+from .openai_client import DEFAULT_BASE_URL, OpenAIClient, OpenAIError, validate_base_url
 from .project import (PROJECT_SETTING_KEYS, FileConflict, InvalidScript, Project,
                       ProjectError, ProjectStore)
 from .translator import (DEFAULT_SYSTEM_PROMPT, TranslationCancelled,
@@ -50,6 +50,7 @@ def _default_settings_path() -> Path:
 
 DEFAULT_SETTINGS: Dict[str, Any] = {
     "base_url": DEFAULT_BASE_URL,
+    "api_key": "",
     "model": "",
     "enable_thinking": True,
     "system_prompt": DEFAULT_SYSTEM_PROMPT,
@@ -61,7 +62,7 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "context_window": 32768,
     "response_reserve_percent": 20,
     "context_clear_percent": 50,
-    "allow_remote_lmstudio": False,
+    "allow_remote_endpoint": False,
 }
 
 
@@ -140,7 +141,7 @@ class APIError(Exception):
 class SettingsStore:
     """Validated current settings layered over durable user and project defaults."""
 
-    _GLOBAL_KEYS = frozenset(("base_url", "allow_remote_lmstudio"))
+    _GLOBAL_KEYS = frozenset(("base_url", "api_key", "allow_remote_endpoint"))
     _ALL_KEYS = frozenset(DEFAULT_SETTINGS)
 
     def __init__(self, defaults_path: Optional[Path] = None):
@@ -157,6 +158,7 @@ class SettingsStore:
             value = json.loads(self.defaults_path.read_text(encoding="utf-8"))
             if not isinstance(value, Mapping):
                 raise ValueError("top-level value must be an object")
+            value = self._migrate_connection_settings(value)
             unknown = set(value) - self._ALL_KEYS
             if unknown:
                 raise ValueError("unknown settings: %s" % ", ".join(sorted(unknown)))
@@ -168,17 +170,26 @@ class SettingsStore:
             return dict(DEFAULT_SETTINGS)
 
     @classmethod
+    def _migrate_connection_settings(cls, value: Mapping[str, Any]) -> Dict[str, Any]:
+        value = dict(value)
+        if "allow_remote_lmstudio" in value:
+            value.setdefault("allow_remote_endpoint", value.pop("allow_remote_lmstudio"))
+        return value
+
+    @classmethod
     def _validate(cls, candidate: Mapping[str, Any]) -> Dict[str, Any]:
         result = dict(candidate)
-        for key in ("model", "system_prompt", "game_context", "target_language"):
+        for key in ("model", "api_key", "system_prompt", "game_context", "target_language"):
             if not isinstance(result.get(key), str):
                 raise APIError(400, "%s must be a string" % key)
+        if any(ord(char) < 32 or ord(char) > 126 for char in result["api_key"]):
+            raise APIError(400, "api_key must contain only printable ASCII characters")
         if not result["target_language"].strip():
             raise APIError(400, "target_language cannot be empty")
         if len(result["system_prompt"]) > 50000 or len(result["game_context"]) > 100000:
             raise APIError(400, "prompt or game context is too large")
-        if not isinstance(result.get("allow_remote_lmstudio"), bool):
-            raise APIError(400, "allow_remote_lmstudio must be a boolean")
+        if not isinstance(result.get("allow_remote_endpoint"), bool):
+            raise APIError(400, "allow_remote_endpoint must be a boolean")
         if not isinstance(result.get("enable_thinking"), bool):
             raise APIError(400, "enable_thinking must be a boolean")
         temperature = result.get("temperature")
@@ -201,7 +212,7 @@ class SettingsStore:
                 raise APIError(400, "%s must be between %d and %d" % (key, minimum, maximum))
         try:
             result["base_url"] = validate_base_url(
-                result.get("base_url"), result["allow_remote_lmstudio"])
+                result.get("base_url"), result["allow_remote_endpoint"])
         except ValueError as exc:
             raise APIError(400, str(exc)) from exc
         return result
@@ -223,6 +234,7 @@ class SettingsStore:
     def merged(self, changes: Mapping[str, Any]) -> Dict[str, Any]:
         if not isinstance(changes, Mapping):
             raise APIError(400, "settings must be an object")
+        changes = self._migrate_connection_settings(changes)
         unknown = set(changes) - self._ALL_KEYS
         if unknown:
             raise APIError(400, "unknown settings: %s" % ", ".join(sorted(unknown)))
@@ -325,7 +337,7 @@ class JobManager:
         files = [project.read_file(summary["path"]) for summary in summaries]
         selected = select_lines(files, file_paths, line_ids)
         if not settings.get("model", "").strip():
-            raise TranslationError("select a loaded LM Studio model first")
+            raise TranslationError("select a loaded LLM server model first")
         if not selected:
             raise TranslationError("no matching translatable lines were selected")
         job = TranslationJob(uuid.uuid4().hex, project.root_string, len(selected))
@@ -356,8 +368,9 @@ class JobManager:
             job.started_at = _utc_now()
 
         try:
-            client = LMStudioClient(
-                settings["base_url"], settings["allow_remote_lmstudio"])
+            client = OpenAIClient(
+                settings["base_url"], settings["allow_remote_endpoint"],
+                api_key=settings["api_key"])
             file_by_path = {file_data["path"]: file_data for file_data in files}
 
             def persist_turn(path: str,
@@ -885,8 +898,8 @@ class RequestHandler(BaseHTTPRequestHandler):
             return
         if self.command == "GET" and path == "/api/models":
             settings = self.state.settings.get()
-            client = LMStudioClient(settings["base_url"], settings["allow_remote_lmstudio"],
-                                    timeout=15.0)
+            client = OpenAIClient(settings["base_url"], settings["allow_remote_endpoint"],
+                                  timeout=15.0, api_key=settings["api_key"])
             self._send_json(200, {"models": client.models()})
             return
         if self.command == "POST" and path == "/api/tool-jobs":
@@ -997,7 +1010,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             self._send_error_json(getattr(exc, "status", 400), str(exc))
         except TranslationError as exc:
             self._send_error_json(422, str(exc))
-        except LMStudioError as exc:
+        except OpenAIError as exc:
             self._send_error_json(502, str(exc))
         except (BrokenPipeError, ConnectionResetError):
             pass

@@ -8,7 +8,7 @@ from .server import DEFAULT_HOST, DEFAULT_PORT, run
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Run the local LM Studio visual-novel translation editor")
+        description="Run the local LLM server visual-novel translation editor")
     parser.add_argument("--host", default=DEFAULT_HOST,
                         help="loopback bind address (default: %(default)s)")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT,
