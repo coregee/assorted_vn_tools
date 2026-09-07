@@ -177,6 +177,7 @@
 
   const THEME_STORAGE_KEY = "translation-workbench.theme";
   const LINES_PER_PAGE = 200;
+  const DEFAULT_DOCUMENT_TITLE = document.title;
 
   const state = {
     projectPath: "",
@@ -1336,6 +1337,9 @@
 
   function renderJob() {
     const job = state.job;
+    document.title = job && !isFinishedStatus(job.status)
+      ? `${job.completed}/${job.total} entries · ${DEFAULT_DOCUMENT_TITLE}`
+      : DEFAULT_DOCUMENT_TITLE;
     $("job-panel").hidden = !job;
     if (!job) {
       $("file-list").querySelectorAll(".file-item").forEach((button) => {
