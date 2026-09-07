@@ -6,6 +6,7 @@ from llm_translation_tools.openai_client import OpenAIError
 from llm_translation_tools.translator import (
     TranslationEngine,
     TranslationError,
+    TranslationCancelled,
     _trim_old_turns,
     estimate_message_tokens,
     parse_translation_response,
@@ -555,6 +556,164 @@ class TranslationCycleTests(unittest.TestCase):
             )
 
         self.assertEqual(4, len(client.calls))
+
+    def test_second_retry_discards_invalid_output_and_keeps_valid_history(self):
+        path = "script/a.json"
+        lines = [line(path, index, str(index)) for index in range(3)]
+        client = RecordingClient([
+            response_for("First."), "malformed answer", "malformed answer",
+            response_for("Second."), response_for("Third."),
+        ])
+        committed = []
+
+        TranslationEngine(client).translate(
+            [{"path": path, "lines": lines}], SETTINGS,
+            turn_completed=lambda _path, rows: committed.extend(rows),
+        )
+
+        clean = client.calls[3]["messages"]
+        self.assertEqual(["system", "user", "assistant", "user"],
+                         [message["role"] for message in clean])
+        self.assertIn("First.", clean[2]["content"])
+        self.assertIn("exactly 1 non-empty translation string", clean[-1]["content"])
+        self.assertNotIn("malformed answer", json.dumps(clean))
+        following = json.dumps(client.calls[4]["messages"])
+        self.assertNotIn("PREVIOUS RESPONSE INVALID", following)
+        self.assertNotIn("malformed answer", following)
+        self.assertEqual([entry["id"] for entry in lines],
+                         [entry["id"] for entry in committed])
+
+    def test_final_retry_rebuilds_context_like_manual_restart(self):
+        path = "script/a.json"
+        lines = [line(path, index, "Source %d" % index) for index in range(3)]
+
+        class RestartOnlyClient(RecordingClient):
+            def chat_completion(self, messages, *args, **kwargs):
+                prompt = messages[-1]["content"]
+                if "Source 2" in prompt:
+                    response = response_for("Third.")
+                elif "Source 1" not in json.dumps(messages):
+                    response = response_for("First.")
+                elif (len(messages) == 2 and
+                      "CURRENT TRANSLATION: First." in prompt):
+                    response = response_for("Second.")
+                else:
+                    response = "malformed answer"
+                self.responses.append(response)
+                return super().chat_completion(messages, *args, **kwargs)
+
+        client = RestartOnlyClient([])
+        committed = []
+        progress = []
+        TranslationEngine(client).translate(
+            [{"path": path, "lines": lines}], SETTINGS,
+            turn_completed=lambda _path, rows: committed.extend(rows),
+            progress=lambda done, *_: progress.append(done),
+        )
+
+        restarted_lines = copy.deepcopy(lines)
+        restarted_lines[0]["translation"] = "First."
+        manual = RecordingClient([response_for("Second.")])
+        TranslationEngine(manual).translate(
+            [{"path": path, "lines": restarted_lines}], SETTINGS,
+            line_ids=[lines[1]["id"]],
+        )
+        self.assertEqual(manual.calls[0], client.calls[4])
+        self.assertNotIn("Source 2", client.calls[4]["messages"][-1]["content"])
+        self.assertEqual([1, 2, 3], progress)
+        self.assertEqual([entry["id"] for entry in lines],
+                         [entry["id"] for entry in committed])
+
+    def test_compact_retry_overflow_trims_history_without_losing_active_turn(self):
+        path = "script/a.json"
+        lines = [line(path, index, "Source %d" % index) for index in range(3)]
+        client = RecordingClient([
+            response_for("First."), "malformed answer" * 1000,
+            OpenAIError("context length exceeded", status=400),
+            response_for("Second."), response_for("Third."),
+        ])
+
+        TranslationEngine(client).translate(
+            [{"path": path, "lines": lines}], SETTINGS)
+
+        trimmed = client.calls[3]["messages"]
+        self.assertEqual(["system", "user"], [m["role"] for m in trimmed])
+        self.assertIn("Source 1", trimmed[-1]["content"])
+        following = client.calls[4]["messages"]
+        self.assertEqual(["system", "user", "assistant", "user"],
+                         [m["role"] for m in following])
+        self.assertIn("Source 1", following[1]["content"])
+        self.assertNotIn("PREVIOUS RESPONSE INVALID", following[1]["content"])
+
+    def test_failed_recovery_preserves_only_previously_completed_turns(self):
+        path = "script/a.json"
+        lines = [line(path, index, "Source %d" % index) for index in range(2)]
+        client = RecordingClient([response_for("First.")] + ["invalid"] * 4)
+        committed = []
+
+        with self.assertRaisesRegex(TranslationError, "after 3 retries"):
+            TranslationEngine(client).translate(
+                [{"path": path, "lines": lines}], SETTINGS,
+                turn_completed=lambda _path, rows: committed.extend(rows),
+            )
+        self.assertEqual(5, len(client.calls))
+        self.assertEqual([lines[0]["id"]], [row["id"] for row in committed])
+
+    def test_cancellation_prevents_fresh_restart_request(self):
+        path = "script/a.json"
+        client = RecordingClient(["invalid"] * 3)
+        committed = []
+        with self.assertRaises(TranslationCancelled):
+            TranslationEngine(client).translate(
+                [{"path": path, "lines": [line(path, 0, "Source")]}], SETTINGS,
+                cancelled=lambda: len(client.calls) >= 3,
+                turn_completed=lambda _path, rows: committed.extend(rows),
+            )
+        self.assertEqual(3, len(client.calls))
+        self.assertEqual([], committed)
+
+    def test_final_retry_fits_rebuilt_references_and_preserves_all_targets(self):
+        path = "script/a.json"
+        lines = [line(path, 0, "Old source " * 200, "Old translation.")]
+        lines += [line(path, index, "Source %d" % index) for index in range(1, 4)]
+        client = RecordingClient([
+            response_for("First."), *(["invalid"] * 3),
+            response_for_many(("Second.", "Third.")),
+        ])
+        # One completed turn followed by a two-target batch.
+        settings = {**SETTINGS, "context_window": 2000,
+                    "batch_mode": "characters", "batch_limit": 16}
+        lines[1]["source"] = "First source is longer than the batch character limit."
+
+        result = TranslationEngine(client).translate(
+            [{"path": path, "lines": lines}], settings)
+
+        self.assertEqual(3, len(result))
+        fresh = client.calls[-1]["messages"]
+        self.assertEqual(["system", "user"], [m["role"] for m in fresh])
+        self.assertLessEqual(estimate_message_tokens(fresh), 1500)
+        self.assertNotIn("Old source", fresh[-1]["content"])
+        self.assertIn("CURRENT TRANSLATION: First.", fresh[-1]["content"])
+        for target in lines[2:]:
+            self.assertIn('<<<TARGET "%s">>>' % target["id"], fresh[-1]["content"])
+
+    def test_endpoint_overflow_discards_repair_chatter_even_if_estimate_fits(self):
+        path = "script/a.json"
+        overflow = OpenAIError("context length exceeded", status=400)
+        for last_response in (response_for("Hello."), overflow):
+            with self.subTest(recoverable=isinstance(last_response, str)):
+                client = RecordingClient(["invalid", overflow, last_response])
+                engine = TranslationEngine(client)
+                files = [{"path": path, "lines": [line(path, 0, "Source")]}]
+                if isinstance(last_response, str):
+                    result = engine.translate(files, SETTINGS)
+                    self.assertEqual("Hello.", result[0]["suggestion"])
+                else:
+                    with self.assertRaises(OpenAIError):
+                        engine.translate(files, SETTINGS)
+                self.assertEqual(3, len(client.calls))
+                self.assertEqual(["system", "user"],
+                                 [m["role"] for m in client.calls[-1]["messages"]])
 
     def test_structured_output_rejection_falls_back_to_plain_json(self):
         target = line("script/a.json", 0, "こんにちは")

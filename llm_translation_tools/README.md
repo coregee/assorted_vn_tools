@@ -118,7 +118,18 @@ The editor requests a JSON schema when supported, falling back to plain chat
 if the server rejects the format. All output still passes strict application-level
 JSON, count, and order validation. Engine-token
 mismatches are accepted with per-entry review flags; structurally invalid responses
-are repaired conversationally before anything is committed.
+get up to three recovery attempts before the turn fails:
+
+1. Ask for a correction with the validation error and invalid response.
+2. Discard the invalid response and regenerate with a compact format instruction,
+   retaining valid conversation history that fits.
+3. Start a fresh conversation, rebuilding earlier source lines and successful
+   translations as reference context, just as when manually restarting a job.
+
+Recovery still obeys the context budget, and oversized correction chatter is
+discarded immediately. Only complete, validated turns are saved; earlier saved
+turns remain intact if recovery fails or the job is cancelled. Failed responses
+and correction instructions are excluded from subsequent conversation history.
 
 Each new turn adds only the chronological lines not already present in the
 conversation; the retained transcript is resent with each request. Set **Batch by** to **Messages** to cap the number of target

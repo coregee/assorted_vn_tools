@@ -522,6 +522,50 @@ class ServerIntegrationTests(unittest.TestCase):
             {},
         )[0])
 
+    def test_job_recovers_with_fresh_context_and_persists_each_turn_once(self):
+        opened = self.open_project()
+        path = opened["files"][0]["path"]
+        self.request("/api/settings", "PUT", {
+            "model": "fixture-model", "batch_mode": "messages", "batch_limit": 1,
+        })
+        client = FakeOpenAIClient()
+        complete = client.chat_completion
+        calls = []
+        saved_during_retries = []
+
+        def respond(messages, *args, **kwargs):
+            calls.append(messages)
+            if 2 <= len(calls) <= 4:
+                saved_during_retries.append(json.loads(
+                    (self.script / "scene.json").read_text(encoding="utf-8")))
+                return "malformed answer"
+            return complete(messages, *args, **kwargs)
+
+        with mock.patch("llm_translation_tools.server.OpenAIClient", return_value=client), \
+                mock.patch.object(client, "chat_completion", side_effect=respond):
+            job_id = self.request("/api/jobs", "POST", {"files": [path]})[1]["id"]
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                job = self.request("/api/jobs/" + job_id)[1]
+                if job["status"] in ("completed", "failed", "cancelled"):
+                    break
+                time.sleep(0.02)
+            else:
+                self.fail("translation recovery did not finish")
+
+        self.assertEqual("completed", job["status"], job.get("error"))
+        self.assertEqual(5, len(calls))
+        self.assertEqual(["system", "user"], [m["role"] for m in calls[-1]])
+        self.assertIn("CURRENT TRANSLATION: Translated line 1", calls[-1][-1]["content"])
+        for saved in saved_during_retries:
+            self.assertEqual("Translated line 1", saved[0]["translated"])
+            self.assertIsNone(saved[1]["translated"])
+        result = self.request("/api/jobs/%s/result" % job_id)[1]
+        self.assertEqual(2, len(result["suggestions"]))
+        self.assertEqual(2, len({row["id"] for row in result["suggestions"]}))
+        saved = json.loads((self.script / "scene.json").read_text(encoding="utf-8"))
+        self.assertEqual(["Translated line 1"] * 2, [row["translated"] for row in saved])
+
     @mock.patch("llm_translation_tools.server.OpenAIClient", BlockingSecondTurnClient)
     def test_job_saves_each_turn_and_preserves_it_when_cancelled(self):
         (self.script / "scene.json").write_text(

@@ -506,6 +506,7 @@ class TranslationEngine:
                 history, batch, context_start, suggested, glossary, prompt_limit,
                 clear_percent)
             attempt_messages = request_messages
+            attempt_has_repair = False
             parsed: Optional[List[Dict[str, Any]]] = None
             repair_attempt = 0
             request_failures = 0
@@ -520,16 +521,27 @@ class TranslationEngine:
                         bool(settings.get("enable_thinking", True)))
                 except OpenAIError as error:
                     if _context_overflow_endpoint_error(error):
-                        preserve_tail = 3 if repair_attempt else 1
+                        preserve_tail = 3 if attempt_has_repair else 1
                         trimmed = _clear_oldest_complete_turns(
                             attempt_messages, prompt_limit, preserve_tail,
                             clear_percent)
                         if trimmed is not None:
                             attempt_messages = trimmed
-                            if repair_attempt:
+                            if attempt_has_repair:
                                 request_messages = attempt_messages[:-2]
                             else:
-                                request_messages = attempt_messages
+                                # Keep the canonical prompt, not the compact correction,
+                                # when updating the retained successful conversation.
+                                request_messages = attempt_messages[:-1] + [request_messages[-1]]
+                            continue
+                        if attempt_has_repair:
+                            # The endpoint may count more tokens than our estimate.
+                            # Drop repair chatter even when no completed turns remain.
+                            attempt_messages = _compact_repair_replay(
+                                request_messages, prompt_limit, len(batch.targets),
+                                clear_percent)
+                            request_messages = attempt_messages[:-1] + [request_messages[-1]]
+                            attempt_has_repair = False
                             continue
                     if (request_failures >= TURN_RETRY_COUNT or
                             not _retryable_endpoint_error(error)):
@@ -552,6 +564,25 @@ class TranslationEngine:
                             (repair_attempt, error)
                         ) from error
                     repair_attempt += 1
+                    if repair_attempt == TURN_RETRY_COUNT:
+                        # Match a manual restart: rebuild chronological references with
+                        # successful translations, without replaying assistant turns.
+                        # context_start belongs to the old conversation, so start at 0.
+                        request_messages = fit_batch_request(
+                            [{"role": "system", "content": system_content}],
+                            batch, 0, suggested, glossary, prompt_limit, clear_percent)
+                        attempt_messages = request_messages
+                        attempt_has_repair = False
+                        continue
+                    if repair_attempt > 1:
+                        # Repeated repairs can anchor the model to its malformed answer.
+                        # Regenerate from valid history and a compact format instruction.
+                        attempt_messages = _compact_repair_replay(
+                            request_messages, prompt_limit, len(batch.targets),
+                            clear_percent)
+                        request_messages = attempt_messages[:-1] + [request_messages[-1]]
+                        attempt_has_repair = False
+                        continue
                     repair = (
                         "Your previous response was invalid: %s\nRetry this same turn now. "
                         "Return only a JSON array with one translation string per TARGET line "
@@ -572,9 +603,11 @@ class TranslationEngine:
                         attempt_messages = _compact_repair_replay(
                             request_messages, prompt_limit, len(batch.targets),
                             clear_percent)
-                        request_messages = attempt_messages
+                        request_messages = attempt_messages[:-1] + [request_messages[-1]]
+                        attempt_has_repair = False
                     else:
                         request_messages = attempt_messages[:-2]
+                        attempt_has_repair = True
                     continue
 
                 # Future context only needs the valid canonical turn, not retry chatter.
