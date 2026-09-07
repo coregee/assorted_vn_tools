@@ -567,6 +567,48 @@ class ServerIntegrationTests(unittest.TestCase):
         self.assertEqual(["Translated line 1"] * 2, [row["translated"] for row in saved])
 
     @mock.patch("llm_translation_tools.server.OpenAIClient", BlockingSecondTurnClient)
+    def test_manual_save_during_job_and_later_model_output_wins(self):
+        BlockingSecondTurnClient.reset()
+        opened = self.open_project()
+        path = opened["files"][0]["path"]
+        file_url = "/api/file?" + urllib.parse.urlencode({"path": path})
+        original = self.request(file_url)[1]
+        self.request("/api/settings", "PUT", {
+            "model": "fixture-model", "batch_mode": "messages", "batch_limit": 1,
+        })
+        job_id = self.request("/api/jobs", "POST", {"files": [path]})[1]["id"]
+        try:
+            self.assertTrue(BlockingSecondTurnClient.second_started.wait(timeout=5))
+            # Save using the pre-job token: the first model turn has already changed it.
+            status, saved, _ = self.request("/api/file", "PUT", {
+                "path": path, "token": original["token"],
+                "allow_managed_changes": True,
+                "updates": [
+                    {"id": line["id"], "translation": "Manual %d" % index}
+                    for index, line in enumerate(original["lines"])
+                ],
+            })
+            self.assertEqual(200, status)
+            self.assertEqual(["Manual 0", "Manual 1"],
+                             [line["translation"] for line in saved["lines"]])
+            disk = json.loads((self.script / "scene.json").read_text(encoding="utf-8"))
+            self.assertEqual(["Manual 0", "Manual 1"], [row["translated"] for row in disk])
+        finally:
+            BlockingSecondTurnClient.release_second.set()
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            job = self.request("/api/jobs/" + job_id)[1]
+            if job["status"] in ("completed", "failed", "cancelled"):
+                break
+            time.sleep(0.02)
+        else:
+            self.fail("translation job did not finish after manual save")
+        self.assertEqual("completed", job["status"], job.get("error"))
+        final = self.request(file_url)[1]
+        self.assertEqual(["Manual 0", "Translated line 1"],
+                         [line["translation"] for line in final["lines"]])
+
+    @mock.patch("llm_translation_tools.server.OpenAIClient", BlockingSecondTurnClient)
     def test_job_saves_each_turn_and_preserves_it_when_cancelled(self):
         (self.script / "scene.json").write_text(
             json.dumps([

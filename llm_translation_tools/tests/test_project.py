@@ -145,6 +145,34 @@ class ProjectAdapterTests(unittest.TestCase):
         with self.assertRaises(FileConflict):
             self.project.update_file(snapshot["path"], snapshot["token"], [])
 
+    def test_managed_writes_merge_but_external_changes_still_conflict(self):
+        snapshot = self.project.read_file("script/dasaku.json")
+        line_id = snapshot["lines"][0]["id"]
+        self.project.update_file(snapshot["path"], snapshot["token"], [
+            {"id": line_id, "translation": "Manual"},
+        ])
+        updated = self.project.update_file(snapshot["path"], snapshot["token"], [
+            {"id": line_id, "translation": "Model"},
+        ], allow_managed_changes=True)
+        self.assertEqual("Model", updated["lines"][0]["translation"])
+
+        disk_path = self.script / "dasaku.json"
+        document = json.loads(disk_path.read_text(encoding="utf-8"))
+        document[0]["message"] = "Source changed externally"
+        write_json(disk_path, document)
+        with self.assertRaises(FileConflict):
+            self.project.update_file(snapshot["path"], updated["token"], [
+                {"id": line_id, "translation": "Must not overwrite"},
+            ], allow_managed_changes=True)
+        # Accepting a newly loaded external version invalidates the old lineage.
+        external = self.project.read_file(snapshot["path"])
+        self.project.update_file(snapshot["path"], external["token"], [
+            {"id": line_id, "translation": "New source translation"},
+        ])
+        with self.assertRaises(FileConflict):
+            self.project.update_file(snapshot["path"], updated["token"], [],
+                                     allow_managed_changes=True)
+
     def test_protected_records_cannot_be_updated(self):
         snapshot = self.project.read_file("script/config.json")
         with self.assertRaises(ProjectError):

@@ -384,7 +384,8 @@ class JobManager:
                     "expected_engine_tokens": suggestion.get("expected_engine_tokens", []),
                     "returned_engine_tokens": suggestion.get("returned_engine_tokens", []),
                 } for suggestion in suggestions]
-                updated = project.update_file(path, file_data["token"], updates)
+                updated = project.update_file(
+                    path, file_data["token"], updates, allow_managed_changes=True)
                 file_data["token"] = updated["token"]
                 file_data["lines"] = updated["lines"]
                 with job.lock:
@@ -875,7 +876,8 @@ class RequestHandler(BaseHTTPRequestHandler):
             if not isinstance(body, Mapping):
                 raise APIError(400, "request body must be an object")
             self._send_json(200, self.state.projects.current().update_file(
-                body.get("path"), body.get("token"), body.get("updates")))
+                body.get("path"), body.get("token"), body.get("updates"),
+                allow_managed_changes=body.get("allow_managed_changes", False)))
             return
         if self.command == "GET" and path == "/api/settings":
             self._send_json(200, self.state.settings.get())

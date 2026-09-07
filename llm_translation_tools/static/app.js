@@ -98,10 +98,10 @@
       return this.request(`${ENDPOINTS.file}?${query}`, { signal });
     },
 
-    saveFile(path, token, updates) {
+    saveFile(path, token, updates, allowManagedChanges = false) {
       return this.request(ENDPOINTS.file, {
         method: "PUT",
-        body: { path, token, updates },
+        body: { path, token, updates, allow_managed_changes: allowManagedChanges },
       });
     },
 
@@ -529,7 +529,7 @@
       const checkbox = createElement("input", "file-select");
       checkbox.type = "checkbox";
       checkbox.checked = state.selectedFiles.has(file.path);
-      checkbox.disabled = Boolean(state.job) || state.saving;
+      checkbox.disabled = state.saving;
       checkbox.dataset.path = file.path;
       checkbox.setAttribute("aria-label", `Select ${file.name} for batch translation`);
       const button = createElement("button", "file-item");
@@ -571,8 +571,8 @@
     const count = state.selectedFiles.size;
     const busy = Boolean(state.job) || state.saving;
     $("selected-file-count").textContent = String(count);
-    $("select-all-files").disabled = busy || state.files.length === count;
-    $("select-no-files").disabled = busy || count === 0;
+    $("select-all-files").disabled = state.saving || state.files.length === count;
+    $("select-no-files").disabled = state.saving || count === 0;
     $("translate-files").disabled = busy || count === 0;
   }
 
@@ -754,7 +754,7 @@
           targetPath: finished.target_path,
         });
       } else {
-        await refreshTranslatedFiles({ preserveSelection: true });
+        await refreshTranslatedFiles();
         const flagged = Number(finished.flagged_count ?? 0) || 0;
         setStatus("Repacked scripts successfully" +
           (flagged ? `; flagged ${flagged} line${flagged === 1 ? "" : "s"} that did not fit` : ""));
@@ -801,7 +801,7 @@
     }
   }
 
-  function renderActiveFile() {
+  function renderActiveFile({ preserveFocus = false } = {}) {
     if (!state.activeFile) {
       renderProject();
       return;
@@ -812,7 +812,7 @@
     $("active-file-path").textContent = state.activeFile.path;
     $("active-file-path").title = state.activeFile.path;
     renderFileList();
-    renderLineList();
+    renderLineList({ preserveFocus });
     updateDirtyUi();
     updateSelectionUi();
   }
@@ -837,8 +837,17 @@
     container.append(section);
   }
 
-  function renderLineList() {
+  function renderLineList({ preserveFocus = false } = {}) {
     if (!state.activeFile) return;
+    const focused = preserveFocus && document.activeElement?.matches(".translation-input")
+      && $("line-list").contains(document.activeElement) ? document.activeElement : null;
+    const cursor = focused ? {
+      key: focused.dataset.lineKey,
+      start: focused.selectionStart,
+      end: focused.selectionEnd,
+      direction: focused.selectionDirection,
+      scrollTop: focused.scrollTop,
+    } : null;
     const query = state.lineFilter.trim().toLocaleLowerCase();
     const matchingLines = state.activeFile.lines.filter((line) => lineMatchesFilter(line, query));
     const pageCount = Math.max(1, Math.ceil(matchingLines.length / LINES_PER_PAGE));
@@ -861,7 +870,7 @@
       checkbox.type = "checkbox";
       checkbox.dataset.lineKey = line.key;
       checkbox.checked = state.selected.has(line.key);
-      checkbox.disabled = !line.translatable || Boolean(state.job) || state.saving;
+      checkbox.disabled = !line.translatable || state.saving;
       selectWrap.append(checkbox);
 
       const content = createElement("div", "line-content");
@@ -895,7 +904,7 @@
       clearButton.dataset.lineAction = "clear";
       clearButton.setAttribute("aria-label", `Clear translation for line ${line.index}`);
       clearButton.title = "Mark this line untranslated (save null)";
-      clearButton.disabled = !line.translatable || Boolean(state.job) ||
+      clearButton.disabled = !line.translatable || state.saving ||
         (!line.hasTranslation && line.translation === "");
       lineActions.append(clearButton);
       if (line.emptyIsApplied) {
@@ -904,7 +913,7 @@
         blankButton.dataset.lineAction = "blank";
         blankButton.setAttribute("aria-label", `Set intentional blank output for line ${line.index}`);
         blankButton.title = "Save an intentional empty output for this engine";
-        blankButton.disabled = !line.translatable || Boolean(state.job) ||
+        blankButton.disabled = !line.translatable || state.saving ||
           (line.hasTranslation && line.translation === "");
         lineActions.append(blankButton);
       }
@@ -915,7 +924,7 @@
       textarea.dataset.lineKey = line.key;
       textarea.value = line.translation;
       textarea.placeholder = line.translatable ? "Enter translation…" : "This line is not translatable";
-      textarea.disabled = !line.translatable || Boolean(state.job) || state.saving;
+      textarea.disabled = !line.translatable || state.saving;
       textarea.rows = 2;
       textarea.setAttribute("aria-label", `Translation for line ${line.index}`);
       translationSection.append(textarea);
@@ -952,6 +961,15 @@
       button.disabled = state.linePage >= pageCount - 1;
     });
     [...$("line-list").querySelectorAll("textarea")].forEach(autoSizeTextarea);
+    if (cursor) {
+      const replacement = [...$("line-list").querySelectorAll(".translation-input")]
+        .find((input) => input.dataset.lineKey === cursor.key);
+      if (replacement && !replacement.disabled) {
+        replacement.focus({ preventScroll: true });
+        replacement.setSelectionRange(cursor.start, cursor.end, cursor.direction);
+        replacement.scrollTop = cursor.scrollTop;
+      }
+    }
   }
 
   function changeLinePage(offset) {
@@ -1003,7 +1021,7 @@
 
   function updateDirtyUi() {
     const count = state.dirty.size;
-    $("save-button").disabled = count === 0 || Boolean(state.job) || state.saving;
+    $("save-button").disabled = count === 0 || state.saving;
     $("save-state").textContent = count ? `${count} unsaved change${count === 1 ? "" : "s"}` : "Saved";
     $("save-state").classList.toggle("unsaved", count > 0);
   }
@@ -1015,9 +1033,9 @@
     $("translate-selected").disabled = count === 0 || jobActive;
     $("translate-untranslated").disabled = jobActive || !state.activeFile?.lines.some((line) => line.translatable && !line.hasTranslation);
     $("translate-file").disabled = jobActive || !state.activeFile?.lines.some((line) => line.translatable);
-    $("select-untranslated").disabled = jobActive;
-    $("select-all").disabled = jobActive;
-    $("select-none").disabled = count === 0 || jobActive;
+    $("select-untranslated").disabled = state.saving;
+    $("select-all").disabled = state.saving;
+    $("select-none").disabled = count === 0 || state.saving;
   }
 
   function setSelection(predicate) {
@@ -1040,6 +1058,8 @@
     const file = state.activeFile;
     const path = file.path;
     const token = file.token;
+    const duringTranslation = Boolean(state.job);
+    let savedSuccessfully = false;
     const queued = [...state.dirty.entries()].map(([key, update]) => ({ key, ...update }));
     const updates = queued.map(({ id, translation }) => ({ id, translation }));
     setSavingState(true);
@@ -1048,7 +1068,7 @@
     setStatus(`Saving ${updates.length} edit${updates.length === 1 ? "" : "s"}…`);
 
     try {
-      const payload = await api.saveFile(path, token, updates);
+      const payload = await api.saveFile(path, token, updates, duringTranslation);
       if (state.activeFile !== file) throw new ApiError("The active file changed while saving; reload it before continuing.");
       const filePayload = payload?.file ?? payload ?? {};
       if (filePayload.token !== undefined) file.token = filePayload.token;
@@ -1077,6 +1097,7 @@
       renderProjectStats();
       renderFileList();
       setStatus(state.dirty.size ? "Saved; newer edits are still unsaved" : `Saved ${baseName(path)}`);
+      savedSuccessfully = true;
       return true;
     } catch (error) {
       if (!quiet) showError(error, error.status === 409 ? "File changed on disk" : "Could not save changes");
@@ -1087,6 +1108,8 @@
       setButtonBusy($("save-button"), false);
       setSavingState(false);
       updateDirtyUi();
+      // A progress/completion refresh may have been skipped while saving.
+      if (duringTranslation && savedSuccessfully) await refreshTranslatedFiles();
     }
   }
 
@@ -1365,7 +1388,7 @@
       : job.status === "queued" ? "Waiting for LLM server…" : "Building context and translating…");
     $("cancel-job").disabled = isFinishedStatus(job.status) || job.status === "cancelling";
     $("file-list").querySelectorAll(".file-item").forEach((button) => { button.disabled = state.saving; });
-    $("file-list").querySelectorAll(".file-select").forEach((checkbox) => { checkbox.disabled = true; });
+    $("file-list").querySelectorAll(".file-select").forEach((checkbox) => { checkbox.disabled = state.saving; });
     updateFileSelectionUi();
     updateSelectionUi();
     updateDirtyUi();
@@ -1461,7 +1484,7 @@
         await finishJob(state.job);
       } else {
         if (state.job.completed > previousCompleted) {
-          await refreshTranslatedFiles({ preserveSelection: true });
+          await refreshTranslatedFiles();
         }
         scheduleJobPoll();
       }
@@ -1482,44 +1505,46 @@
 
   async function finishJob(job) {
     clearTimeout(state.jobPollTimer);
+    await refreshTranslatedFiles();
     state.job = null;
     renderJob();
     if (isCancelledStatus(job.status)) {
-      await refreshTranslatedFiles();
       setStatus("Translation cancelled");
       return;
     }
     if (!isSuccessStatus(job.status)) {
-      await refreshTranslatedFiles();
       showError(job.error || job.message || "The local model could not complete this translation.", "Translation failed");
       setStatus("Translation failed");
       return;
     }
-    await refreshTranslatedFiles();
     const count = Number(job.completed || job.raw?.result_count || 0);
     setStatus(`Translated and saved ${count} line${count === 1 ? "" : "s"}` +
       (job.flagged ? `; flagged ${job.flagged} for delimiter review` : ""));
   }
 
-  async function refreshTranslatedFiles({ preserveSelection = false } = {}) {
+  async function refreshTranslatedFiles() {
+    if (state.saving) return;
     const activePath = state.activeFile?.path;
     const loadSequence = state.loadSequence;
-    const selected = preserveSelection ? new Set(state.selected) : new Set();
+    const activeFile = state.activeFile;
+    const activeToken = activeFile?.token;
     try {
       state.files = normalizeFiles(await api.getFiles());
       if (activePath && loadSequence === state.loadSequence && state.activeFile?.path === activePath) {
         const payload = await api.getFile(activePath);
-        if (loadSequence !== state.loadSequence || state.activeFile?.path !== activePath) {
+        if (state.saving || loadSequence !== state.loadSequence || state.activeFile !== activeFile
+            || activeFile.token !== activeToken) {
           renderProjectStats();
           renderFileList();
           return;
         }
         state.activeFile = normalizeFile(payload, activePath);
         state.selected = new Set(
-          [...selected].filter((key) => state.activeFile.lines.some((line) => line.key === key))
+          [...state.selected].filter((key) => state.activeFile.lines.some((line) => line.key === key))
         );
+        // Model output is already saved on disk and replaces local field values.
         state.dirty.clear();
-        renderActiveFile();
+        renderActiveFile({ preserveFocus: true });
       } else {
         renderProject();
       }
@@ -1690,7 +1715,7 @@
       const modifier = event.ctrlKey || event.metaKey;
       if (modifier && event.key.toLocaleLowerCase() === "s") {
         event.preventDefault();
-        if (state.dirty.size && !state.job) saveActiveFile();
+        if (state.dirty.size) saveActiveFile();
       } else if (modifier && event.key === "Enter") {
         event.preventDefault();
         if (state.selected.size && !state.job) startTranslation("selected");
@@ -1700,7 +1725,7 @@
         $("file-filter").select();
       } else if (event.altKey && event.key.toLocaleLowerCase() === "a") {
         event.preventDefault();
-        if (state.activeFile && !state.job) setSelection(() => true);
+        if (state.activeFile && !state.saving) setSelection(() => true);
       }
     });
 

@@ -13,6 +13,7 @@ import os
 import re
 import tempfile
 import threading
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Tuple
@@ -258,6 +259,7 @@ class Project:
         self.root = root
         self.script_root = script_root
         self._lock = threading.RLock()
+        self._write_tokens = {}
 
     @classmethod
     def open(cls, path: str, script_dir: Optional[str] = None,
@@ -510,17 +512,27 @@ class Project:
             }
 
     def update_file(self, relative_path: str, expected_token: str,
-                    updates: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
+                    updates: Sequence[Mapping[str, Any]], *,
+                    allow_managed_changes: bool = False) -> Dict[str, Any]:
         if not isinstance(expected_token, str) or not expected_token:
             raise ProjectError("a file concurrency token is required")
         if not isinstance(updates, list):
             raise ProjectError("updates must be a JSON array")
+        if not isinstance(allow_managed_changes, bool):
+            raise ProjectError("allow_managed_changes must be a boolean")
         with self._lock:
             path = self.resolve_file(relative_path)
             raw, document, schema, bindings = self._load_path(path)
-            if _token(raw) != expected_token:
-                raise FileConflict("file changed on disk; reload it before saving")
             relative = self._relative(path)
+            current_token = _token(raw)
+            history = self._write_tokens.get(relative)
+            # Merge only across our own translation writes. External changes still
+            # require a reload, even when a caller allows concurrent model output.
+            managed_change = (allow_managed_changes and history
+                              and history[-1] == current_token
+                              and expected_token in history)
+            if current_token != expected_token and not managed_change:
+                raise FileConflict("file changed on disk; reload it before saving")
             by_id = {relative + "#" + line.pointer: line for line in bindings}
             review_flags = self._load_review_flags()
             original_review_flags = dict(review_flags)
@@ -578,6 +590,10 @@ class Project:
                 else:
                     binding.entry[binding.translation_key] = value
             new_raw = _atomic_json(path, document)
+            if not history or history[-1] != current_token:
+                history = deque([current_token], maxlen=2048)
+                self._write_tokens[relative] = history
+            history.append(_token(new_raw))
             if review_flags != original_review_flags:
                 _atomic_json(self.root / PROJECT_REVIEW_FILE, review_flags)
             _raw, _document, new_schema, new_bindings = self._load_path(path)

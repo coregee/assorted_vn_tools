@@ -76,6 +76,12 @@ open a known folder immediately at launch.
 The editor also supports direct manual editing, source/translation search,
 speaker-name glossary files, protected non-translatable records, optimistic
 save conflict detection, and keyboard shortcuts shown from the `?` button.
+You can edit translations and change selections while a job runs. Progress
+updates reload the model's autosaved output and overwrite the current field
+values, including unsaved edits. The editor keeps typing focus when refreshing.
+Save Changes and Ctrl+S also work during translation. Manual saves and model
+updates write only their changed translations; the later write wins for a line
+both update. Changes made outside the app still trigger a save conflict.
 
 The in-app actions intentionally use each toolset's script-only default. Large
 image/audio processing and executable/font patches remain explicit command-line
