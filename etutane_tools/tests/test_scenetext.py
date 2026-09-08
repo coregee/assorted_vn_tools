@@ -19,10 +19,67 @@ def blob(*payloads):
     return b"".join(record(payload) for payload in payloads)
 
 
-COMMAND = b"M#N\x01\x00\x00\x00"
+COMMAND = b"M#N\x0d\x00\x00\x00"
+
+
+def command(opcode, *arguments):
+    return b"M#N" + struct.pack("<I", opcode) + b"".join(
+        b"N" + struct.pack("<I", value) for value in arguments)
 
 
 class SceneTextPageTests(unittest.TestCase):
+    def test_reflow_relocates_forward_backward_and_timed_targets(self):
+        label = b"MLN\x00\x00\x00\x00"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            original, scripts, output = root / "original", root / "script", root / "output"
+            original.mkdir()
+            scripts.mkdir()
+            source = blob(
+                command(1, 5),                         # Forward jump.
+                label,                                 # Original record 1.
+                source_string("文章"),                 # Expands from one record to two.
+                scenetext.PAGE_ADVANCE,
+                command(100, 5, 1, 5),                 # Two destinations; duration 5 is not a target.
+                label,                                 # Original record 5 -> rebuilt record 6.
+                command(50, 1, 5, 1, 5),               # Four input/choice destinations.
+                command(1, 1),                         # Backward jump.
+                command(13, 5),                        # An unrelated numeric operand stays 5.
+                source_string("一"),                   # Two original strings shrink to one.
+                source_string("二"),
+                scenetext.PAGE_ADVANCE,
+                label,                                 # Original record 12 remains record 12.
+                command(1, 12),
+            )
+            (original / "scene.a0").write_bytes(source)
+            (scripts / "scene.json").write_text(json.dumps({"file": "scene.a0", "lines": [
+                {"i": 0, "string_indices": [0], "jp": "文章", "translated": "one two three four"},
+                {"i": 1, "string_indices": [1, 2], "jp": "一二", "translated": "short"},
+            ]}), encoding="utf-8")
+            scenetext.build(str(scripts), str(original), str(output), str(root / "names.json"), cols=10)
+            rebuilt = [payload for _, payload in tinkerbell.parse_records((output / "scene.a0").read_bytes())]
+            self.assertEqual(command(1, 6), rebuilt[0])
+            self.assertEqual(command(100, 6, 1, 5), rebuilt[5])
+            self.assertEqual(label, rebuilt[6])
+            self.assertEqual(command(50, 1, 6, 1, 6), rebuilt[7])
+            self.assertEqual(command(1, 1), rebuilt[8])
+            self.assertEqual(command(13, 5), rebuilt[9])
+            self.assertEqual(label, rebuilt[12])
+            self.assertEqual(command(1, 12), rebuilt[13])
+
+    def test_relocation_rejects_damaged_targets_instead_of_guessing(self):
+        records = [(0, source_string("文章"))]
+        with self.assertRaisesRegex(ValueError, "invalid or removed label"):
+            tinkerbell.relocate_record_targets(command(1, 0), records, {0: 0})
+        with self.assertRaisesRegex(ValueError, "unsupported operands"):
+            tinkerbell.relocate_record_targets(command(100, 0), records, {0: 0})
+
+    def test_furigana_source_roundtrips_without_changing_original_bytes(self):
+        raw = bytes.fromhex("ffff01") + "よ".encode("cp932") + b"\x02" + "読む".encode("cp932")
+        displayed = tinkerbell.body_to_text(raw)
+        self.assertEqual(raw, tinkerbell.text_to_body(displayed))
+        self.assertEqual(raw, scenetext._to_engine_body(displayed))
+
     def test_extract_groups_consecutive_display_lines_into_pages(self):
         names = {}
         source = blob(

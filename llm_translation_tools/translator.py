@@ -9,6 +9,8 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from .openai_client import (OpenAIClient, OpenAIError,
                             TRANSLATIONS_RESPONSE_FORMAT)
+from .engine_text import engine_tokens
+from etutane_tools.libraries.furigana import FURIGANA, furigana_for_prompt
 
 
 DEFAULT_SYSTEM_PROMPT = """You are translating a Japanese visual novel into polished,
@@ -62,13 +64,6 @@ class TranslationBatch:
     targets: Sequence[Mapping[str, Any]]
 
 
-_ENGINE_TOKEN = re.compile(r"(?:\\x[0-9A-Fa-f]{2}|«[0-9A-Fa-f]{2}»)")
-
-
-def _engine_tokens(text: str) -> List[str]:
-    return _ENGINE_TOKEN.findall(text)
-
-
 def parse_translation_response(raw: str,
                                expected: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
     """Validate response structure and flag, rather than reject, token mismatches."""
@@ -91,8 +86,16 @@ def parse_translation_response(raw: str,
             raise TranslationError("translation %d must be a string" % (index + 1))
         if not translated.strip():
             raise TranslationError("translation %d is empty" % (index + 1))
-        source_tokens = _engine_tokens(expected_line["source"])
-        translated_tokens = _engine_tokens(translated)
+        source = expected_line["source"]
+        if source.startswith("「") and source.endswith("」"):
+            translated = translated.replace("「", "").replace("」", "").strip()
+            if not translated.startswith('"'):
+                translated = '"' + translated
+            if not translated.endswith('"'):
+                translated += '"'
+        schema = expected_line.get("schema")
+        source_tokens = engine_tokens(source, schema)
+        translated_tokens = engine_tokens(translated, schema)
         parsed_row: Dict[str, Any] = {
             "id": expected_line["id"],
             "translation": translated,
@@ -100,7 +103,11 @@ def parse_translation_response(raw: str,
         if translated_tokens != source_tokens:
             parsed_row.update({
                 "flagged": True,
-                "flag_reason": "Engine delimiters differ from the source; review this translation.",
+                "flag_reason": (
+                    "Control codes or malformed furigana markup differ from the source; "
+                    "complete furigana annotations are optional."
+                    if schema == "etutane" else
+                    "Engine delimiters differ from the source; review this translation."),
                 "expected_engine_tokens": source_tokens,
                 "returned_engine_tokens": translated_tokens,
             })
@@ -235,11 +242,22 @@ def _display_line(line: Mapping[str, Any], role: str,
         parts.append("KIND: " + line["kind"])
     segments = line.get("source_segments")
     if isinstance(segments, list) and len(segments) > 1 and all(isinstance(s, str) for s in segments):
-        parts.append("SOURCE: " + "".join(_source_for_prompt(segment) for segment in segments))
+        source = "".join(_source_for_prompt(segment) for segment in segments)
     else:
-        parts.append("SOURCE: " + _source_for_prompt(line["source"]))
+        source = _source_for_prompt(line["source"])
+    if line.get("schema") == "etutane":
+        source = furigana_for_prompt(source)
+        if FURIGANA.search(line["source"]):
+            parts.append(
+                "FURIGANA: [furigana reading: ...] annotates the following Japanese base text. "
+                "Use the reading for interpretation only. Translate the base text naturally; "
+                "omit the reading annotation and its binary markup from the translation. "
+                "Furigana is not a required control code. Preserve other engine tokens.")
+    parts.append("SOURCE: " + source)
     existing = suggested.get(line["id"], line.get("translation"))
     if existing is not None:
+        if line.get("schema") == "etutane":
+            existing = furigana_for_prompt(existing)
         parts.append("CURRENT TRANSLATION: " + existing)
     if line.get("context"):
         parts.append("SOURCE RECORD CONTEXT: " + line["context"])

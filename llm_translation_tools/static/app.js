@@ -197,6 +197,8 @@
     saving: false,
     fileFilter: "",
     lineFilter: "",
+    translationFilter: "all",
+    issueFilter: "all",
     linePage: 0,
     loadSequence: 0,
     fileAbortController: null,
@@ -212,7 +214,7 @@
     "select-no-files", "translate-files", "welcome-state", "choose-folder-button", "editor",
     "active-file-name", "active-file-path", "save-state", "save-button", "selection-count", "select-untranslated",
     "select-all", "select-none", "translate-selected", "translate-untranslated", "translate-file",
-    "line-filter", "visible-line-count", "job-panel", "job-title", "job-message", "job-progressbar", "job-progress",
+    "line-filter", "translation-filter", "issue-filter", "visible-line-count", "job-panel", "job-title", "job-message", "job-progressbar", "job-progress",
     "cancel-job", "line-list", "empty-lines", "line-pagination", "previous-line-page", "line-page-label",
     "next-line-page", "app-status", "settings-button", "settings-dialog",
     "settings-form", "setting-base-url", "setting-api-key", "setting-model", "models-list", "models-status", "setting-target-language",
@@ -331,6 +333,7 @@
       translatable_count: Number.isFinite(translatableCount) ? translatableCount : lineCount,
       translated_count: Number.isFinite(translatedCount) ? translatedCount : 0,
       flagged_count: Number.isFinite(flaggedCount) ? flaggedCount : 0,
+      review_counts: raw.review_counts ?? {},
       token: raw.token ?? null,
     };
   }
@@ -550,12 +553,17 @@
       const percent = counts.translatable ? Math.round((counts.translated / counts.translatable) * 100) : 0;
       const progress = createElement("span", "file-percent", `${percent}%`);
       progress.title = `${counts.translated} of ${counts.translatable} translatable lines (${counts.total} total)`;
-      const flaggedCount = file.flagged_count;
-      if (flaggedCount) {
-        progress.textContent = `⚑ ${flaggedCount} · ${percent}%`;
-        progress.classList.add("has-review-flags");
-        progress.title += `; ${flaggedCount} translation${flaggedCount === 1 ? "" : "s"} flagged for review`;
+      const reviewCounts = active ? countReviewCategories(state.activeFile.lines) : file.review_counts;
+      const badges = createElement("span", "file-review-flags");
+      for (const [category, count] of Object.entries(reviewCounts)) {
+        if (!count) continue;
+        const flag = { category };
+        const label = reviewFlagLabel(flag);
+        const badge = createElement("span", `review-flag-badge ${reviewFlagClass(flag)}`, `${label}: ${count}`);
+        badge.title = `${count} line${count === 1 ? "" : "s"} with ${label.toLocaleLowerCase()}`;
+        badges.append(badge);
       }
+      if (Object.values(reviewCounts).some((count) => count > 0)) copy.append(badges);
       button.append(icon, copy, progress);
       row.append(checkbox, button);
       fragment.append(row);
@@ -818,6 +826,12 @@
   }
 
   function lineMatchesFilter(line, query) {
+    if (state.translationFilter === "translated" && (!line.translatable || !line.hasTranslation)) return false;
+    if (state.translationFilter === "untranslated" && (!line.translatable || line.hasTranslation)) return false;
+    const flags = reviewFlagItems(line.reviewFlag);
+    if (state.issueFilter === "issues" && !flags.length) return false;
+    if (state.issueFilter !== "all" && state.issueFilter !== "issues"
+      && !flags.some((flag) => (flag.category || "engine_delimiters") === state.issueFilter)) return false;
     if (!query) return true;
     return `${line.sourceDisplay}\n${line.translation}\n${line.speaker}\n${line.context}\n${line.kind}\n${line.reviewFlag?.reason || ""}`
       .toLocaleLowerCase()
@@ -825,9 +839,27 @@
   }
 
   function reviewFlagLabel(flag) {
-    if (flag?.category === "repack_overflow") return "Repack overflow";
-    if (flag?.category === "multiple") return "Multiple review flags";
-    return "Review delimiters";
+    if (flag?.category === "repack_overflow") return "Repack issues";
+    if (!flag?.category || flag.category === "engine_delimiters") return "Control codes";
+    return "Other issues";
+  }
+
+  function reviewFlagClass(flag) {
+    return flag?.category === "repack_overflow" ? "issue-repack" : "issue-control";
+  }
+
+  function reviewFlagItems(flag) {
+    if (!flag) return [];
+    return Array.isArray(flag.flags) ? flag.flags.flatMap(reviewFlagItems) : [flag];
+  }
+
+  function countReviewCategories(lines) {
+    const counts = {};
+    lines.forEach((line) => {
+      const categories = new Set(reviewFlagItems(line.reviewFlag).map((flag) => flag.category || "engine_delimiters"));
+      categories.forEach((category) => { counts[category] = (counts[category] || 0) + 1; });
+    });
+    return counts;
   }
 
   function appendLineSection(container, label, value, className) {
@@ -881,16 +913,16 @@
       if (line.emptyIsApplied && line.hasTranslation && line.translation === "") {
         meta.append(createElement("span", "kind-badge blank-output-badge", "Intentional blank"));
       }
-      if (line.reviewFlag) {
-        meta.append(createElement("span", "review-flag-badge", reviewFlagLabel(line.reviewFlag)));
+      for (const flag of reviewFlagItems(line.reviewFlag)) {
+        meta.append(createElement("span", `review-flag-badge ${reviewFlagClass(flag)}`, reviewFlagLabel(flag)));
       }
       if (!line.translatable) meta.append(createElement("span", "locked-label", "Not translatable"));
       content.append(meta);
 
       appendLineSection(content, "Source", line.sourceDisplay || "(empty source)", "source-text");
       if (line.context) appendLineSection(content, "Context", line.context, "context-text");
-      if (line.reviewFlag) {
-        appendLineSection(content, "Review flag", line.reviewFlag.reason, "review-flag-text");
+      for (const flag of reviewFlagItems(line.reviewFlag)) {
+        appendLineSection(content, reviewFlagLabel(flag), flag.reason, `review-flag-text ${reviewFlagClass(flag)}`);
       }
 
       const translationSection = createElement("div", "line-section");
@@ -938,7 +970,7 @@
 
     $("line-list").replaceChildren(fragment);
     const pageEnd = pageStart + visibleLines.length;
-    if (query) {
+    if (query || state.translationFilter !== "all" || state.issueFilter !== "all") {
       $("visible-line-count").textContent = matchingLines.length
         ? `${pageStart + 1}–${pageEnd} of ${matchingLines.length} matches · ${state.activeFile.lines.length} lines total`
         : `0 matches · ${state.activeFile.lines.length} lines total`;
@@ -1091,6 +1123,7 @@
         entry.translatable_count = file.lines.filter((line) => line.translatable).length;
         entry.translated_count = file.lines.filter((line) => line.translatable && line.hasTranslation).length;
         entry.flagged_count = file.lines.filter((line) => line.reviewFlag).length;
+        entry.review_counts = countReviewCategories(file.lines);
       }
       renderLineList();
       updateDirtyUi();
@@ -1671,6 +1704,13 @@
       state.linePage = 0;
       renderLineList();
     });
+    for (const [id, key] of [["translation-filter", "translationFilter"], ["issue-filter", "issueFilter"]]) {
+      $(id).addEventListener("change", (event) => {
+        state[key] = event.target.value;
+        state.linePage = 0;
+        renderLineList();
+      });
+    }
     document.querySelectorAll("[data-line-page-offset]").forEach((button) => {
       button.addEventListener("click", () => changeLinePage(Number(button.dataset.linePageOffset)));
     });

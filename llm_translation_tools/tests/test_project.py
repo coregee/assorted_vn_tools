@@ -236,10 +236,21 @@ class ProjectAdapterTests(unittest.TestCase):
             }])
         self.assertEqual("multiple", combined["lines"][0]["review_flag"]["category"])
         self.assertEqual(2, len(combined["lines"][0]["review_flag"]["flags"]))
+        listed = next(item for item in self.project.list_files() if item["path"] == snapshot["path"])
+        self.assertEqual(1, listed["flagged_count"])
+        self.assertEqual({"repack_overflow": 1, "engine_delimiters": 1}, listed["review_counts"])
 
         self.project.replace_review_flags("repack_overflow", [])
         remaining = self.project.read_file(snapshot["path"])["lines"][0]["review_flag"]
         self.assertEqual("engine_delimiters", remaining["category"])
+        listed = next(item for item in self.project.list_files() if item["path"] == snapshot["path"])
+        self.assertEqual({"engine_delimiters": 1}, listed["review_counts"])
+        self.project.update_file(snapshot["path"], combined["token"], [
+            {"id": line["id"], "translation": "Reviewed translation"},
+        ])
+        listed = next(item for item in self.project.list_files() if item["path"] == snapshot["path"])
+        self.assertEqual(0, listed["flagged_count"])
+        self.assertEqual({}, listed["review_counts"])
 
     def test_paths_are_confined_to_script_workspace(self):
         outside = self.base / "outside.json"
@@ -249,6 +260,37 @@ class ProjectAdapterTests(unittest.TestCase):
             self.project.resolve_file("outside.json")
         with self.assertRaises(UnsafePath):
             self.project.resolve_file("../outside.json")
+
+    def test_furigana_review_refresh_preserves_scripts_repack_flags_and_damage(self):
+        path = self.script / "ruby.json"
+        source = "«FF»«FF»«01»よ«02»読む"
+        write_json(path, {"lines": [
+            {"jp": source, "translated": "Read"},
+            {"jp": source, "translated": "«FF»«01»r«02»ead"},
+        ]})
+        snapshot = self.project.read_file("script/ruby.json")
+        self.assertEqual("etutane", snapshot["lines"][0]["schema"])
+        self.project.replace_review_flags("engine_delimiters", [
+            {"path": snapshot["path"], "pointer": "/lines/%d" % i, "reason": "Old mismatch"}
+            for i in range(2)
+        ])
+        self.project.replace_review_flags("repack_overflow", [
+            {"path": snapshot["path"], "pointer": "/lines/0", "reason": "Keep this warning"},
+        ])
+        before_script = path.read_bytes()
+        before_review = (self.base / PROJECT_REVIEW_FILE).read_bytes()
+        preview = self.project.refresh_furigana_review_flags()
+        self.assertEqual((1, 1), (preview["removed"], preview["remaining"]))
+        self.assertEqual(before_review, (self.base / PROJECT_REVIEW_FILE).read_bytes())
+        result = self.project.refresh_furigana_review_flags(apply=True)
+        self.assertTrue(result["applied"])
+        self.assertEqual(before_review, Path(result["backup"]).read_bytes())
+        self.assertEqual(before_script, path.read_bytes())
+        after = self.project.read_file(snapshot["path"])["lines"]
+        self.assertEqual("repack_overflow", after[0]["review_flag"]["category"])
+        self.assertEqual([], after[1]["review_flag"]["expected_engine_tokens"])
+        self.assertIn("malformed furigana", after[1]["review_flag"]["reason"])
+        self.assertFalse(self.project.refresh_furigana_review_flags(apply=True)["applied"])
 
     def test_direct_script_folder_and_state_filename_are_repacker_safe(self):
         direct = Project.open(str(self.script))

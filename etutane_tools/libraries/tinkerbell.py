@@ -262,6 +262,40 @@ def is_string_record(payload):
     """True if `payload` is a dialogue/name string record ('S' tag, >= 5 bytes)."""
     return len(payload) >= 5 and payload[0:1] == b"S"
 
+
+# M# opcode -> (number of numeric arguments, arguments holding record indices).
+# These operands address ML label records, not byte offsets or string indices.
+# Confirmed against the game interpreter and every original scenario:
+# 1: jump; 50: four input/choice destinations; 100: two timed-wait destinations.
+_RECORD_TARGETS = {1: (1, (0,)), 50: (4, (0, 1, 2, 3)), 100: (3, (0, 1))}
+
+
+def relocate_record_targets(payload, original_records, record_map):
+    """Relocate known literal label operands after strings are inserted/deleted.
+
+    Never guess from a numeric value: timing, image IDs, variables and unrelated
+    commands can contain the same integer. Fail before deployment if a known
+    control-flow command does not have the supported numeric/label structure.
+    """
+    if len(payload) < 7 or payload[:3] != b"M#N":
+        return payload
+    opcode = struct.unpack_from("<I", payload, 3)[0]
+    spec = _RECORD_TARGETS.get(opcode)
+    if spec is None:
+        return payload
+    argc, targets = spec
+    if len(payload) != 7 + 5 * argc or any(payload[7 + 5 * i] != ord("N") for i in range(argc)):
+        raise ValueError("unsupported operands for record-target opcode %d" % opcode)
+    result = bytearray(payload)
+    for arg in targets:
+        offset = 8 + 5 * arg
+        target = struct.unpack_from("<I", payload, offset)[0]
+        if (target >= len(original_records) or original_records[target][1][:3] != b"MLN"
+                or target not in record_map):
+            raise ValueError("opcode %d targets invalid or removed label record %d" % (opcode, target))
+        struct.pack_into("<I", result, offset, record_map[target])
+    return bytes(result)
+
 def string_slen(payload):
     """Declared body length of a string record (the u32 after the 'S' tag)."""
     return struct.unpack_from("<I", payload, 1)[0]

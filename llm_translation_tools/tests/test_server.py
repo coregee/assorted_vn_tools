@@ -145,7 +145,7 @@ class ServerIntegrationTests(unittest.TestCase):
         self.assertIn(b"const LINES_PER_PAGE = 200", app)
         self.assertIn(b"context_clear_percent: 50", app)
         self.assertIn(b"matchingLines.slice(pageStart, pageStart + LINES_PER_PAGE)", app)
-        self.assertIn(b"Repack overflow", app)
+        self.assertIn(b"Repack issues", app)
 
         opened = self.open_project()
         self.assertEqual(str(self.root), opened["project"]["root"])

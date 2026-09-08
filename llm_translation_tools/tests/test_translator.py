@@ -10,6 +10,8 @@ from llm_translation_tools.translator import (
     _trim_old_turns,
     estimate_message_tokens,
     parse_translation_response,
+    TranslationBatch,
+    batch_prompt,
 )
 
 
@@ -75,6 +77,34 @@ def response_for_many(translations):
 
 
 class ResponseValidationTests(unittest.TestCase):
+    def test_corner_quoted_sources_get_double_quoted_translations(self):
+        expected = [line("script/a.json", 0, "「こんにちは」")]
+        for returned in (
+            "Hello.", "「Hello.」", '"Hello."', '"Hello.', 'Hello."',
+            '「Hello."', '"Hello.」', '「"Hello."」',
+            '  「Hello.」\n', '  "Hello."\n',
+        ):
+            with self.subTest(returned=returned):
+                result = parse_translation_response(response_for(returned), expected)
+                self.assertEqual('"Hello."', result[0]["translation"])
+                self.assertNotIn("flagged", result[0])
+
+    def test_quote_normalization_only_applies_to_fully_wrapped_sources(self):
+        for source in ("こんにちは", "「こんにちは", "こんにちは」", "彼は「こんにちは」と言った"):
+            with self.subTest(source=source):
+                returned = "  「Hello.」  "
+                result = parse_translation_response(
+                    response_for(returned), [line("script/a.json", 0, source)])
+                self.assertEqual(returned, result[0]["translation"])
+
+    def test_quote_normalization_preserves_engine_tokens_and_inner_double_quotes(self):
+        result = parse_translation_response(
+            response_for('「Say "hello"\\x81 «FE».」'),
+            [line("script/a.json", 0, "「挨拶して\\x81 «FE»」")],
+        )
+        self.assertEqual('"Say "hello"\\x81 «FE»."', result[0]["translation"])
+        self.assertNotIn("flagged", result[0])
+
     def test_assigns_expected_ids_in_order_and_preserves_engine_tokens(self):
         expected = [line("script/a.json", 0, "待って\\x81 «FE»")]
         result = parse_translation_response(
@@ -121,6 +151,47 @@ class ResponseValidationTests(unittest.TestCase):
 
 
 class TranslationCycleTests(unittest.TestCase):
+    def test_etutane_furigana_is_optional_but_other_tokens_and_damage_are_checked(self):
+        source = "「«FF»«FF»«01»よ«02»読む«FE»」"
+        target = dict(line("script/a.json", 0, source), schema="etutane")
+        for translated in ("Read«FE»", "«FF»«FF»«01»r«02»ead«FE»"):
+            result = parse_translation_response(response_for(translated), [target])[0]
+            self.assertNotIn("flagged", result)
+        missing = parse_translation_response(response_for("Read"), [target])[0]
+        self.assertEqual(["«FE»"], missing["expected_engine_tokens"])
+        self.assertTrue(missing["flagged"])
+        malformed = parse_translation_response(response_for("«FF»«01»r«02»ead«FE»"), [target])[0]
+        self.assertTrue(malformed["flagged"])
+        self.assertIn("malformed furigana", malformed["flag_reason"])
+        target["schema"] = "sstar"
+        self.assertTrue(parse_translation_response(response_for("Read«FE»"), [target])[0]["flagged"])
+
+    def test_etutane_prompt_explains_readings_in_targets_and_references(self):
+        source = "«FF»«FF»«01»よ«02»読む"
+        reference = dict(line("script/a.json", 0, source, "«FF»«FF»«01»r«02»ead"), schema="etutane")
+        target = dict(line("script/a.json", 1, source, source_segments=[source, "。"]), schema="etutane")
+        prompt = batch_prompt(TranslationBatch("script/a.json", [reference, target], [target]), 0, {})
+        self.assertIn("[furigana reading: よ]読む", prompt)
+        self.assertIn("Furigana is not a required control code", prompt)
+        self.assertNotIn("«FF»", prompt)
+        self.assertEqual(source, target["source"])
+
+    def test_corrected_quotes_reach_completed_turn_and_suggestions(self):
+        path = "script/a.json"
+        targets = [line(path, 0, "「こんにちは」"), line(path, 1, "地の文")]
+        client = RecordingClient([response_for_many(("「Hello.」", "Narration."))])
+        committed = []
+
+        result = TranslationEngine(client).translate(
+            [{"path": path, "lines": targets}], {**SETTINGS, "batch_limit": 2},
+            turn_completed=lambda _path, rows: committed.extend(rows),
+        )
+
+        self.assertEqual(['"Hello."', "Narration."],
+                         [row["suggestion"] for row in committed])
+        self.assertEqual(committed, result)
+        self.assertEqual(1, len(client.calls))
+
     def test_context_clear_percent_targets_usable_prompt_budget(self):
         messages = [{"role": "system", "content": "system"}]
         for index in range(4):

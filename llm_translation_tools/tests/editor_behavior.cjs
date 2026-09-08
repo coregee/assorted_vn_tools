@@ -62,7 +62,7 @@ const context = vm.createContext({
 });
 let script = fs.readFileSync(path.join(__dirname, "../static/app.js"), "utf8");
 script = script.replace("  initialize();", `
-  globalThis.editor = { state, api, normalizeFile, renderActiveFile, renderJob,
+  globalThis.editor = { state, api, normalizeFile, normalizeFileEntry, renderActiveFile, renderJob,
     refreshTranslatedFiles, finishJob, updateLineTranslation, saveActiveFile, bindEvents };
 `);
 vm.runInContext(script, context);
@@ -174,6 +174,81 @@ async function run() {
   resolveFile(updated);
   await staleRefresh;
   assert.equal(state.activeFile, other);
+
+  // Combined issues remain separate in both the sidebar and line details.
+  const repack = { category: "repack_overflow", reason: "Text was truncated" };
+  const control = { category: "engine_delimiters", reason: "Missing control code" };
+  state.activeFile = editor.normalizeFile({ path: "script/review.json", lines: [
+    { id: "both", source: "Both issues", translation: "Translated", review_flag: {
+      category: "multiple", reason: "Text was truncated\nMissing control code", flags: [repack, control],
+    } },
+    { id: "repack", source: "Repack only", translation: null, review_flag: repack },
+    { id: "control", source: "Codes only", translation: "", translation_active: true,
+      empty_is_applied: true, review_flag: control },
+    { id: "clean", source: "Clean untranslated", translation: null },
+    { id: "locked", source: "Protected", translation: null, translatable: false },
+  ] });
+  state.files = [editor.normalizeFileEntry({ path: "script/review.json" }),
+    editor.normalizeFileEntry({ path: "script/unopened.json", review_counts: {
+      repack_overflow: 3, engine_delimiters: 4,
+    } })];
+  editor.renderActiveFile();
+  const badges = $("file-list").querySelectorAll(".review-flag-badge");
+  assert.deepEqual(badges.map(b => b.textContent), [
+    "Repack issues: 2", "Control codes: 2", "Repack issues: 3", "Control codes: 4",
+  ]);
+  assert.notEqual(badges[0].className, badges[1].className);
+  assert.equal($("line-list").querySelectorAll(".review-flag-badge").length, 4);
+  const visibleKeys = () => $("line-list").querySelectorAll(".translation-input").map(input => input.dataset.lineKey);
+  const filter = (id, value, event = "change") => {
+    $(id).value = value;
+    $(id).listeners[event]({ target: $(id) });
+  };
+  state.linePage = 3;
+  filter("translation-filter", "translated");
+  assert.equal(state.linePage, 0);
+  assert.deepEqual(visibleKeys(), ["both", "control"]);
+  filter("issue-filter", "repack_overflow");
+  assert.deepEqual(visibleKeys(), ["both"]);
+  filter("translation-filter", "untranslated");
+  assert.deepEqual(visibleKeys(), ["repack"]);
+  filter("issue-filter", "all");
+  assert.deepEqual(visibleKeys(), ["repack", "clean"]);
+  filter("translation-filter", "all");
+  filter("issue-filter", "issues");
+  assert.deepEqual(visibleKeys(), ["both", "repack", "control"]);
+  filter("issue-filter", "engine_delimiters");
+  assert.deepEqual(visibleKeys(), ["both", "control"]);
+  filter("line-filter", "both", "input");
+  assert.deepEqual(visibleKeys(), ["both"]);
+  filter("line-filter", "no match", "input");
+  assert.deepEqual(visibleKeys(), []);
+  assert.equal($("empty-lines").hidden, false);
+  assert.match($("visible-line-count").textContent, /0 matches/);
+  filter("line-filter", "", "input");
+  filter("issue-filter", "repack_overflow");
+  api.saveFile = async () => ({ token: "reviewed" });
+  editor.updateLineTranslation("both", "Fixed");
+  assert.equal(await editor.saveActiveFile(), true);
+  assert.deepEqual(visibleKeys(), ["repack"]);
+  assert.equal(state.files[0].review_counts.repack_overflow, 1);
+  assert.equal(state.files[0].review_counts.engine_delimiters, 1);
+
+  // Pagination applies after filtering, and narrowing the result resets the page.
+  state.activeFile = editor.normalizeFile({ path: "script/large.json", lines:
+    Array.from({ length: 405 }, (_, index) => ({
+      id: String(index), source: `Source ${index}`, translation: index % 2 ? null : "Done",
+    })),
+  });
+  filter("issue-filter", "all");
+  filter("translation-filter", "translated");
+  assert.equal(visibleKeys().length, 200);
+  state.linePage = 1;
+  editor.renderActiveFile();
+  assert.deepEqual(visibleKeys(), ["400", "402", "404"]);
+  filter("line-filter", "Source 404", "input");
+  assert.equal(state.linePage, 0);
+  assert.deepEqual(visibleKeys(), ["404"]);
   console.log("Editor behavior checks passed");
 }
 run().catch(error => { console.error(error); process.exitCode = 1; });

@@ -163,6 +163,23 @@
             <span aria-hidden="true">&#128269;</span>
             <input id="line-filter" type="search" autocomplete="off" placeholder="Find source, speaker, or translation…">
           </label>
+          <label class="line-category-filter" for="translation-filter">
+            <span>Translation</span>
+            <select id="translation-filter">
+              <option value="all">All lines</option>
+              <option value="translated">Translated</option>
+              <option value="untranslated">Untranslated</option>
+            </select>
+          </label>
+          <label class="line-category-filter" for="issue-filter">
+            <span>Issues</span>
+            <select id="issue-filter">
+              <option value="all">All lines</option>
+              <option value="issues">Has issues</option>
+              <option value="repack_overflow">Repack issues</option>
+              <option value="engine_delimiters">Control-code mismatches</option>
+            </select>
+          </label>
           <span id="visible-line-count" aria-live="polite"></span>
         </div>
 
@@ -188,7 +205,7 @@
         <div class="line-list" id="line-list" aria-label="Script lines"></div>
         <div class="empty-lines" id="empty-lines" hidden>
           <strong>No lines found</strong>
-          <p>Try clearing the line filter or choose another script.</p>
+          <p>Try clearing the search and setting both filters to All lines, or choose another script.</p>
         </div>
         <nav class="line-pagination" aria-label="Script line pages" hidden>
           <button class="button button-secondary" data-line-page-offset="-1" type="button">Previous</button>

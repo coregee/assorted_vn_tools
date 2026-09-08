@@ -417,11 +417,13 @@ def build(json_dir, orig_dir, out_dir, names_path, cols=LINE_COLS, review_report
                 extras_after.pop(indices[-1], None)
                 errors.append("%s#%d: non-SJIS char in translated page: %s" %
                               (a0name, indices[0], ex))
-        out = bytearray()
+        rebuilt = []
+        record_map = {}
+        original_records = list(tb.parse_records(orig))
         si = 0
         orig_end = 0
         file_changed = False
-        for off, payload in tb.parse_records(orig):
+        for record_index, (off, payload) in enumerate(original_records):
             orig_end = off + 4 + len(payload)
             processed_string_index = None
             if tb.is_string_record(payload):
@@ -443,9 +445,16 @@ def build(json_dir, orig_dir, out_dir, names_path, cols=LINE_COLS, review_report
                         file_changed = True
                 si += 1
             if payload is not None:
-                out += struct.pack("<I", len(payload)) + payload
+                record_map[record_index] = len(rebuilt)
+                rebuilt.append(payload)
             for extra in extras_after.get(processed_string_index, ()):
-                out += struct.pack("<I", len(extra)) + extra
+                rebuilt.append(extra)
+        for original_index, rebuilt_index in record_map.items():
+            rebuilt[rebuilt_index] = tb.relocate_record_targets(
+                rebuilt[rebuilt_index], original_records, record_map)
+        out = bytearray()
+        for payload in rebuilt:
+            out += struct.pack("<I", len(payload)) + payload
         out += orig[orig_end:]
         with open(os.path.join(out_dir, a0name), "wb") as stream:
             stream.write(bytes(out))

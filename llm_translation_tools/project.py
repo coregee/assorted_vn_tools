@@ -18,6 +18,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Tuple
 
+from .engine_text import engine_tokens
+from etutane_tools.libraries.furigana import FURIGANA
+
 
 # Deliberately not ``*.json``: when the opened root is the script directory itself,
 # every existing repacker globs JSON files and would try to ingest application config.
@@ -448,6 +451,7 @@ class Project:
             lines.append({
                 "id": line_id,
                 "index": index,
+                "schema": schema,
                 "source": binding.source,
                 "source_segments": binding.source_segments,
                 "translation": binding.translation,
@@ -483,6 +487,17 @@ class Project:
                     # The script directory can contain manifests and other JSON assets.
                     continue
                 relative = self._relative(resolved)
+                displayed_flags = [
+                    flag for line in bindings
+                    if relative + "#" + line.pointer in review_flags
+                    if (flag := _display_review_flag(
+                        review_flags[relative + "#" + line.pointer], line.source)) is not None
+                ]
+                review_counts: Dict[str, int] = {}
+                for flag in displayed_flags:
+                    for category in {item.get("category", "engine_delimiters")
+                                     for item in _review_flag_items(flag)}:
+                        review_counts[category] = review_counts.get(category, 0) + 1
                 files.append({
                     "path": relative,
                     "schema": schema,
@@ -490,11 +505,8 @@ class Project:
                     "translatable_count": sum(line.translatable for line in bindings),
                     "translated_count": sum(line.translatable and line.translation_active
                                               for line in bindings),
-                    "flagged_count": sum(
-                        _display_review_flag(review_flags[relative + "#" + line.pointer], line.source)
-                        is not None
-                        for line in bindings
-                        if relative + "#" + line.pointer in review_flags),
+                    "flagged_count": len(displayed_flags),
+                    "review_counts": review_counts,
                     "token": _token(raw),
                 })
         return files
@@ -510,6 +522,67 @@ class Project:
                 "token": _token(raw),
                 "lines": self._normalized(path, schema, bindings, review_flags),
             }
+
+    def refresh_furigana_review_flags(self, *, apply: bool = False) -> Dict[str, Any]:
+        """Recheck existing Etutane delimiter flags without changing translations.
+
+        Only complete, recognized source annotations qualify. Other categories,
+        stale sources and malformed translations remain protected from blanket clearing.
+        Applying writes a byte-for-byte backup of the sidecar first.
+        """
+        with self._lock:
+            review_path = self.root / PROJECT_REVIEW_FILE
+            original_raw = review_path.read_bytes() if review_path.exists() else b""
+            original = self._load_review_flags()
+            refreshed = dict(original)
+            removed = updated = remaining = 0
+            for file in self.list_files():
+                if file["schema"] != "etutane":
+                    continue
+                for line in self.read_file(file["path"])["lines"]:
+                    stored = original.get(line["id"])
+                    if not stored or not FURIGANA.search(line["source"]):
+                        continue
+                    if not line["translation_active"]:
+                        continue
+                    retained = []
+                    for flag in _review_flag_items(stored):
+                        if (flag.get("category") != "engine_delimiters"
+                                or flag.get("source") not in (None, line["source"])):
+                            retained.append(flag)
+                            continue
+                        expected = engine_tokens(line["source"], "etutane")
+                        returned = engine_tokens(line["translation"], "etutane")
+                        if expected == returned:
+                            removed += 1
+                            continue
+                        remaining += 1
+                        revised = dict(flag, expected_engine_tokens=expected,
+                                       returned_engine_tokens=returned,
+                                       reason="Control codes or malformed furigana markup differ from "
+                                              "the source; complete furigana annotations are optional.")
+                        updated += revised != flag
+                        retained.append(revised)
+                    if retained:
+                        refreshed[line["id"]] = _packed_review_flags(retained)
+                    else:
+                        refreshed.pop(line["id"], None)
+            result = {"removed": removed, "updated": updated, "remaining": remaining,
+                      "applied": False, "backup": None}
+            if apply and refreshed != original:
+                if review_path.read_bytes() != original_raw:
+                    raise FileConflict("review flags changed while checking; retry the refresh")
+                backup = review_path.with_name(review_path.name + ".before-furigana-" +
+                                               hashlib.sha256(original_raw).hexdigest()[:12])
+                if backup.exists():
+                    if backup.read_bytes() != original_raw:
+                        raise FileConflict("furigana review backup already exists with different content")
+                else:
+                    with backup.open("xb") as stream:
+                        stream.write(original_raw)
+                _atomic_json(review_path, refreshed)
+                result.update(applied=True, backup=str(backup))
+            return result
 
     def update_file(self, relative_path: str, expected_token: str,
                     updates: Sequence[Mapping[str, Any]], *,

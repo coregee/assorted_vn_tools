@@ -740,9 +740,17 @@ select:focus {
   font-variant-numeric: tabular-nums;
 }
 
-.file-percent.has-review-flags {
-  color: var(--warning);
-  font-weight: 700;
+.file-copy .file-review-flags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 5px;
+  white-space: normal;
+}
+
+.file-copy .review-flag-badge {
+  margin-top: 0;
+  font-size: 9px;
 }
 
 .empty-list {
@@ -907,6 +915,7 @@ select:focus {
 
 .line-filter-row {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
@@ -914,8 +923,24 @@ select:focus {
 }
 
 .line-search {
+  flex: 1 1 260px;
   width: min(440px, 100%);
   background: var(--hover-translucent);
+}
+
+.line-category-filter {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--ink-soft);
+  font-size: 11px;
+}
+
+.line-category-filter select {
+  width: auto;
+  max-width: 100%;
+  padding: 7px 9px;
+  font-size: 11px;
 }
 
 #visible-line-count {
@@ -1105,6 +1130,20 @@ select:focus {
 }
 
 .review-flag-text {
+  color: var(--warning);
+}
+
+.issue-repack {
+  color: var(--danger);
+}
+
+.review-flag-badge.issue-repack {
+  color: var(--danger);
+  background: var(--danger-soft);
+}
+
+.issue-control,
+.review-flag-badge.issue-control {
   color: var(--warning);
 }
 

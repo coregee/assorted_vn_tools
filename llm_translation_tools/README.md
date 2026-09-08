@@ -76,6 +76,12 @@ open a known folder immediately at launch.
 The editor also supports direct manual editing, source/translation search,
 speaker-name glossary files, protected non-translatable records, optimistic
 save conflict detection, and keyboard shortcuts shown from the `?` button.
+The sidebar shows separate red repack-issue counts and amber control-code mismatch
+counts. Lines with both issues appear in both counts and show both review reasons.
+Use the Translation and Issues filters above the lines to combine translated or
+untranslated status with all issues or a specific issue type, alongside text search.
+Intentional blank outputs count as translated; protected records appear only under
+All lines. Filters continue to apply when switching files and after saving.
 You can edit translations and change selections while a job runs. Progress
 updates reload the model's autosaved output and overwrite the current field
 values, including unsaved edits. The editor keeps typing focus when refreshing.
@@ -179,6 +185,9 @@ override them.
 The adapter changes only the native translation value. It does not add editor
 metadata to game JSON or reorder records. Successful model output is saved
 directly through the same native-field adapter used by manual edits.
+For source fields starting with `「` and ending with `」`, model output has those
+characters removed and any missing opening or closing straight double quote (`"`)
+added automatically before saving.
 Protected Dasaku engine-variable fields are read-only. Sstar `\xHH` and Etutane
 `«HH»` engine tokens should be reproduced exactly. A translation with missing,
 changed, or reordered tokens is still saved, but that individual entry is flagged
