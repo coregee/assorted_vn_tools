@@ -267,12 +267,13 @@ class ProjectAdapterTests(unittest.TestCase):
         write_json(path, {"lines": [
             {"jp": source, "translated": "Read"},
             {"jp": source, "translated": "«FF»«01»r«02»ead"},
+            {"jp": "読む", "translated": "«FF»«FF»«01»r«02»ead"},
         ]})
         snapshot = self.project.read_file("script/ruby.json")
         self.assertEqual("etutane", snapshot["lines"][0]["schema"])
         self.project.replace_review_flags("engine_delimiters", [
             {"path": snapshot["path"], "pointer": "/lines/%d" % i, "reason": "Old mismatch"}
-            for i in range(2)
+            for i in range(3)
         ])
         self.project.replace_review_flags("repack_overflow", [
             {"path": snapshot["path"], "pointer": "/lines/0", "reason": "Keep this warning"},
@@ -280,7 +281,7 @@ class ProjectAdapterTests(unittest.TestCase):
         before_script = path.read_bytes()
         before_review = (self.base / PROJECT_REVIEW_FILE).read_bytes()
         preview = self.project.refresh_furigana_review_flags()
-        self.assertEqual((1, 1), (preview["removed"], preview["remaining"]))
+        self.assertEqual((2, 1), (preview["removed"], preview["remaining"]))
         self.assertEqual(before_review, (self.base / PROJECT_REVIEW_FILE).read_bytes())
         result = self.project.refresh_furigana_review_flags(apply=True)
         self.assertTrue(result["applied"])
@@ -290,6 +291,7 @@ class ProjectAdapterTests(unittest.TestCase):
         self.assertEqual("repack_overflow", after[0]["review_flag"]["category"])
         self.assertEqual([], after[1]["review_flag"]["expected_engine_tokens"])
         self.assertIn("malformed furigana", after[1]["review_flag"]["reason"])
+        self.assertIsNone(after[2]["review_flag"])
         self.assertFalse(self.project.refresh_furigana_review_flags(apply=True)["applied"])
 
     def test_direct_script_folder_and_state_filename_are_repacker_safe(self):

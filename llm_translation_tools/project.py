@@ -526,7 +526,7 @@ class Project:
     def refresh_furigana_review_flags(self, *, apply: bool = False) -> Dict[str, Any]:
         """Recheck existing Etutane delimiter flags without changing translations.
 
-        Only complete, recognized source annotations qualify. Other categories,
+        Only complete, recognized annotations qualify. Other categories,
         stale sources and malformed translations remain protected from blanket clearing.
         Applying writes a byte-for-byte backup of the sidecar first.
         """
@@ -541,7 +541,8 @@ class Project:
                     continue
                 for line in self.read_file(file["path"])["lines"]:
                     stored = original.get(line["id"])
-                    if not stored or not FURIGANA.search(line["source"]):
+                    if not stored or not (FURIGANA.search(line["source"])
+                                          or FURIGANA.search(line["translation"] or "")):
                         continue
                     if not line["translation_active"]:
                         continue

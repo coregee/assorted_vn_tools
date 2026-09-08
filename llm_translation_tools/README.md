@@ -193,6 +193,13 @@ Protected Dasaku engine-variable fields are read-only. Sstar `\xHH` and Etutane
 changed, or reordered tokens is still saved, but that individual entry is flagged
 for review. Review flags persist in `.llm_translation_tools.review`, outside the
 native game JSON consumed by the repackers.
+Etutane's complete `«FF»«FF»«01»reading«02»` sequences are optional furigana
+annotations, not required control codes. Prompts show the reading as context and
+ask for natural translated text without the annotation. The source JSON stays
+lossless. Incomplete sequences and all other engine tokens still receive checks.
+`Project.refresh_furigana_review_flags()` previews rechecking existing flags;
+passing `apply=True` updates only those delimiter flags and saves a backup of the
+review sidecar. Repack flags and translations are preserved.
 
 ## Local safety and persistence
 

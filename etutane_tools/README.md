@@ -22,6 +22,15 @@ string. `jp_lines` preserves the original on-screen lines and `string_indices` r
 the corresponding binary string slots. Repacking word-wraps the page translation and
 adds/removes physical line records as needed within the page's 3-line dialogue or
 4-line narration budget.
+The repacker relocates literal label references when record counts change: the
+jump command (`M#` opcode 1), four input/choice destinations (50), and both timed
+transition destinations (100). Timing values and unrelated numeric operands stay
+unchanged. Unsupported operands or invalid label destinations stop the build
+before archive deployment.
+
+Source strings retain furigana as `«FF»«FF»«01»reading«02»`, followed by the base
+Japanese text. This is a reading annotation, which can be omitted in a natural
+translation; its bytes do not have to be copied to satisfy control-code checks.
 
 By default, extract/repack only target the scripts. Pass `-i`/`-a` to also process
 images/audio — these archives are large, so repacking them takes significantly longer.
